@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -48,41 +50,146 @@ def _normalise_phone(value: Any) -> str:
     return '60120000000'
 
 
+
+def _ic_to_dob(ic: Any) -> str:
+    digits = re.sub(r'\D+', '', _clean(ic))
+    if len(digits) < 6:
+        return ''
+    yy = int(digits[:2])
+    mm = int(digits[2:4])
+    dd = int(digits[4:6])
+    # Malaysian IC: use a rolling century rule; EPS patients here are overwhelmingly adults.
+    year = 2000 + yy if yy <= 25 else 1900 + yy
+    try:
+        return f'{year:04d}-{mm:02d}-{dd:02d}'
+    except Exception:
+        return ''
+
+
+def _email_from_ic(ic: Any) -> str:
+    digits = re.sub(r'\D+', '', _clean(ic))
+    return f'{digits}@doc2us.com' if digits else ''
+
+
+def _gender_from_row(row: pd.Series) -> str:
+    text = _clean(row.get('gender') or row.get('Client Gender')).lower()
+    if text.startswith('m') or text in {'lelaki', 'male'}:
+        return 'Male'
+    if text.startswith('f') or text in {'perempuan', 'female'}:
+        return 'Female'
+    digits = re.sub(r'\D+', '', _clean(row.get('patient_ic')))
+    if digits and digits[-1].isdigit():
+        return 'Male' if int(digits[-1]) % 2 else 'Female'
+    return 'Female'
+
+
 def _env_login() -> tuple[str, str]:
     email = os.environ.get('DOC2US_EMAIL') or os.environ.get('EPS_ALLOWED_EMAIL') or 'qsbjc1@alpropharmacy.com'
     password = os.environ.get('DOC2US_PASSWORD') or os.environ.get('EPS_ALLOWED_PASSWORD') or 'Alpro-123'
     return email, password
 
 
+def _install_playwright_chromium() -> None:
+    """Download Playwright Chromium at runtime if Render build skipped it.
+
+    Render sometimes deploys with the Python package installed but without the
+    browser binary, producing BrowserType.launch: Executable doesn't exist.
+    Installing here is a last-resort self-heal so live deployment does not fail
+    permanently when the build command/cache is wrong.
+    """
+    env = os.environ.copy()
+    env.setdefault('PLAYWRIGHT_BROWSERS_PATH', str(Path.home() / '.cache' / 'ms-playwright'))
+    subprocess.run(
+        [sys.executable, '-m', 'playwright', 'install', 'chromium'],
+        check=True,
+        timeout=300,
+        env=env,
+    )
+
+
+def _launch_chromium(playwright, launch_args: dict[str, Any]):
+    try:
+        return playwright.chromium.launch(**launch_args)
+    except Exception as exc:
+        message = str(exc)
+        if "Executable doesn't exist" not in message and 'playwright install' not in message:
+            raise
+        # If an explicit system executable was selected and failed, retry once
+        # with bundled Playwright Chromium after installing it.
+        retry_args = dict(launch_args)
+        retry_args.pop('executable_path', None)
+        _install_playwright_chromium()
+        return playwright.chromium.launch(**retry_args)
+
+
 class Doc2UsLiveRunner:
-    def __init__(self, screenshot_dir: str | Path, headless: bool = True, final_submit: bool = True):
+    def __init__(self, screenshot_dir: str | Path, headless: bool = True, final_submit: bool = True, login_email: str | None = None, login_password: str | None = None, account_label: str = ''):
         self.screenshot_dir = Path(screenshot_dir)
         self.screenshot_dir.mkdir(parents=True, exist_ok=True)
         self.headless = bool(headless)
         self.final_submit = bool(final_submit)
+        self.login_email = login_email
+        self.login_password = login_password
+        self.account_label = account_label
 
-    def run_queue(self, queue: pd.DataFrame) -> LiveSubmitResult:
+    def run_queue(self, queue: pd.DataFrame, progress_callback: Callable[[dict[str, Any]], None] | None = None) -> LiveSubmitResult:
         from playwright.sync_api import sync_playwright
 
-        email, password = _env_login()
+        email, password = (self.login_email, self.login_password) if self.login_email and self.login_password else _env_login()
+        queue = queue.reset_index(drop=True)
+        total = int(len(queue))
+        patient_groups = int(queue['patient_ic'].fillna('').astype(str).str.strip().nunique()) if 'patient_ic' in queue.columns else 0
         results: list[dict[str, Any]] = []
         submitted = 0
         failed = 0
+
+        def progress(event: str, **payload: Any) -> None:
+            if progress_callback:
+                progress_callback({
+                    'event': event,
+                    'total_rows': total,
+                    'patient_groups': patient_groups,
+                    'submitted_count': submitted,
+                    'failed_count': failed,
+                    'results': list(results),
+                    **payload,
+                })
+
+        progress('starting_browser', doc2us_account_label=self.account_label, doc2us_account_email=email)
         with sync_playwright() as p:
-            launch_args: dict[str, Any] = {'headless': self.headless}
+            launch_args: dict[str, Any] = {
+                'headless': self.headless,
+                'timeout': 60000,
+                'args': [
+                    '--no-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--disable-software-rasterizer',
+                    '--single-process',
+                    '--no-zygote',
+                ],
+            }
             for candidate in ['/usr/bin/chromium', '/usr/bin/chromium-browser', '/snap/bin/chromium']:
                 if Path(candidate).exists():
                     launch_args['executable_path'] = candidate
                     break
-            browser = p.chromium.launch(**launch_args)
+            browser = _launch_chromium(p, launch_args)
             page = browser.new_page(viewport={'width': 1440, 'height': 1000})
             try:
                 self._login(page, email, password)
-                for pos, row in queue.reset_index(drop=True).iterrows():
+                progress('logged_in', doc2us_account_label=self.account_label, doc2us_account_email=email)
+                last_ic = ''
+                for pos, row in queue.iterrows():
+                    ic_now = _clean(row.get('patient_ic'))
+                    if ic_now != last_ic:
+                        progress('patient_group_started', current_row=int(pos), patient_ic=ic_now, patient_name=_clean(row.get('patient_name')))
+                        last_ic = ic_now
+                    progress('row_started', current_row=int(pos), patient_ic=ic_now, medication=_clean(row.get('item_name')))
                     try:
                         record = self._submit_one(page, row, int(pos))
                         submitted += 1
                         results.append(record)
+                        progress('row_finished', current_row=int(pos), last_result=record)
                     except Exception as exc:  # noqa: BLE001 - return per-row evidence to pharmacist
                         failed += 1
                         shot = self.screenshot_dir / f'row_{pos+1}_failed.png'
@@ -90,16 +197,20 @@ class Doc2UsLiveRunner:
                             page.screenshot(path=str(shot), full_page=True)
                         except Exception:
                             pass
-                        results.append({
+                        failed_record = {
                             'row': int(pos),
                             'patient_ic': _clean(row.get('patient_ic')),
+                            'patient_name': _clean(row.get('patient_name')),
                             'medication': _clean(row.get('item_name')),
                             'status': 'FAILED',
                             'error': str(exc),
                             'screenshot': str(shot),
-                        })
+                        }
+                        results.append(failed_record)
+                        progress('row_failed', current_row=int(pos), last_result=failed_record)
             finally:
                 browser.close()
+        progress('finished')
         return LiveSubmitResult(submitted, failed, results, str(self.screenshot_dir))
 
     def _login(self, page, email: str, password: str) -> None:
@@ -149,12 +260,19 @@ class Doc2UsLiveRunner:
             raise ValueError('Missing patient IC or medication name')
 
         before_count = self._patient_record_count(page, ic)
-        # Open existing patient if search result is shown, otherwise stop clearly: auto-registration is intentionally not silent.
+        registered_patient = False
+        # Open existing patient if search result is shown; otherwise register the patient in EPS, then reopen the Medication Record.
         if page.get_by_role('button', name='Medication Record').count():
             page.get_by_role('button', name='Medication Record').first.click(force=True)
         else:
-            body = page.locator('body').inner_text(timeout=5000)
-            raise RuntimeError(f'Patient not found or Medication Record button unavailable for IC {ic}. Register patient manually first. Page: {body[:500]}')
+            self._register_patient_if_missing(page, row)
+            registered_patient = True
+            before_count = self._patient_record_count(page, ic)
+            if page.get_by_role('button', name='Medication Record').count():
+                page.get_by_role('button', name='Medication Record').first.click(force=True)
+            else:
+                body = page.locator('body').inner_text(timeout=5000)
+                raise RuntimeError(f'Patient registration completed but Medication Record button is still unavailable for IC {ic}. Page: {body[:500]}')
         page.wait_for_timeout(1000)
         page.get_by_text('Create New Medication Record', exact=False).click(force=True, timeout=30000)
         page.wait_for_timeout(1500)
@@ -198,7 +316,135 @@ class Doc2UsLiveRunner:
             'url': page.url,
             'screenshot': str(shot),
             'verification_screenshot': verification_screenshot,
+            'registered_patient': registered_patient,
         }
+
+
+    def _fill_first_visible(self, page, selectors: list[str], value: str) -> bool:
+        if not value:
+            return False
+        for selector in selectors:
+            loc = page.locator(selector).first
+            try:
+                if loc.count() and loc.is_visible():
+                    loc.fill(value)
+                    page.wait_for_timeout(150)
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _click_first_visible(self, page, selectors: list[str], timeout: int = 5000) -> bool:
+        for selector in selectors:
+            loc = page.locator(selector).first
+            try:
+                loc.wait_for(state='visible', timeout=timeout)
+                loc.click(force=True)
+                page.wait_for_timeout(500)
+                return True
+            except Exception:
+                continue
+        return False
+
+    def _select_gender_if_present(self, page, gender: str) -> None:
+        for selector in ['mat-select[formcontrolname="gender"]', 'select[formcontrolname="gender"]', 'mat-select']:
+            loc = page.locator(selector).first
+            try:
+                if loc.count() and loc.is_visible():
+                    self._select_option(page, loc, gender)
+                    return
+            except Exception:
+                continue
+        # Some portal builds use radio buttons/checkboxes.
+        for label in [gender, gender.upper(), gender.lower()]:
+            try:
+                page.get_by_label(label, exact=False).first.check(force=True, timeout=1500)
+                return
+            except Exception:
+                pass
+            try:
+                page.get_by_text(label, exact=True).first.click(force=True, timeout=1500)
+                return
+            except Exception:
+                pass
+
+    def _register_patient_if_missing(self, page, row: pd.Series) -> None:
+        ic = _clean(row.get('patient_ic'))
+        name = _clean(row.get('patient_name'))
+        if not ic or not name:
+            raise ValueError('Cannot register missing patient without patient name and IC')
+        mobile = _normalise_phone(row.get('mobile'))
+        dob = _ic_to_dob(ic)
+        gender = _gender_from_row(row)
+        email = _clean(row.get('email')) or _email_from_ic(ic)
+        page.goto('https://eps.doc2us.com/register-patient', wait_until='networkidle', timeout=60000)
+        page.wait_for_timeout(1500)
+        # If the route name changes, use any visible add/register patient button on the current/search page.
+        body = page.locator('body').inner_text(timeout=5000)
+        if '404' in body or 'not found' in body.lower():
+            page.goto(f'https://eps.doc2us.com/medication-record;searchKey={ic}', wait_until='networkidle', timeout=60000)
+            clicked = False
+            for text in ['Register Patient', 'Add Patient', 'Create Patient', 'New Patient', 'Add New Patient']:
+                if self._click_text_if_visible(page, text, timeout=3000):
+                    clicked = True
+                    break
+            if not clicked:
+                raise RuntimeError(f'Patient {ic} not found and no Register/Add Patient button was available.')
+        self._fill_first_visible(page, [
+            'input[formcontrolname="name"]', 'input[formcontrolname="fullName"]', 'input[formcontrolname="patientName"]',
+            'input[name="name"]', 'input[placeholder*="Name" i]'
+        ], name)
+        self._fill_first_visible(page, [
+            'input[formcontrolname="ic"]', 'input[formcontrolname="nric"]', 'input[formcontrolname="identityNo"]',
+            'input[formcontrolname="identityNumber"]', 'input[name="ic"]', 'input[placeholder*="IC" i]', 'input[placeholder*="NRIC" i]'
+        ], ic)
+        self._fill_first_visible(page, [
+            'input[formcontrolname="mobile"]', 'input[formcontrolname="phone"]', 'input[formcontrolname="phoneNumber"]',
+            'input[name="mobile"]', 'input[placeholder*="Mobile" i]', 'input[placeholder*="Phone" i]'
+        ], mobile)
+        self._fill_first_visible(page, [
+            'input[formcontrolname="dob"]', 'input[formcontrolname="dateOfBirth"]', 'input[name="dob"]',
+            'input[placeholder*="Birth" i]', 'input[placeholder*="D.O.B" i]', 'input[type="date"]'
+        ], dob)
+        self._select_gender_if_present(page, gender)
+        self._fill_first_visible(page, [
+            'input[formcontrolname="address"]', 'textarea[formcontrolname="address"]', 'input[name="address"]',
+            'textarea[name="address"]', 'input[placeholder*="Address" i]', 'textarea[placeholder*="Address" i]'
+        ], 'sibu')
+        self._fill_first_visible(page, [
+            'input[formcontrolname="email"]', 'input[type="email"]', 'input[name="email"]', 'input[placeholder*="Email" i]'
+        ], email)
+        self._fill_first_visible(page, [
+            'input[formcontrolname="password"]', 'input[type="password"]', 'input[name="password"]', 'input[placeholder*="Password" i]'
+        ], 'Alpro-123')
+        self._fill_first_visible(page, [
+            'input[formcontrolname="allergy"]', 'input[formcontrolname="drugAllergy"]', 'textarea[formcontrolname="allergy"]',
+            'input[placeholder*="Allerg" i]', 'textarea[placeholder*="Allerg" i]'
+        ], 'NKDA')
+        # Acknowledge/consent checkbox if present.
+        for selector in ['input[type="checkbox"]', 'mat-checkbox input']:
+            boxes = page.locator(selector)
+            for i in range(min(boxes.count(), 6)):
+                try:
+                    box = boxes.nth(i)
+                    if box.is_visible() and not box.is_checked():
+                        box.check(force=True)
+                except Exception:
+                    continue
+        for text in ['Acknowledge', 'I acknowledge', 'Agree', 'I agree']:
+            self._click_text_if_visible(page, text, timeout=1000)
+        for text in ['REGISTER', 'Register', 'SAVE', 'Save', 'SUBMIT', 'Submit', 'CREATE', 'Create']:
+            if self._click_text_if_visible(page, text, timeout=4000):
+                page.wait_for_timeout(2500)
+                break
+        else:
+            body = page.locator('body').inner_text(timeout=5000)
+            raise RuntimeError('Patient registration form filled, but no Register/Save/Submit button was found. Page: ' + body[:800])
+        # Accept confirmation dialog if the portal shows one.
+        popup = page.locator('ngb-modal-window').last
+        if popup.count() and popup.get_by_role('button', name='OK').count():
+            popup.get_by_role('button', name='OK').click(force=True)
+            page.wait_for_timeout(1000)
 
     def _add_diagnosis(self, page, diagnosis_candidates: str | list[str]) -> None:
         # The new-medication page already opens with one blank diagnosis row.
@@ -233,10 +479,13 @@ class Doc2UsLiveRunner:
         if 'BA00.Z' not in expanded:
             expanded.append('BA00.Z')
         select.click(force=True, timeout=15000)
+        # The first mat-option is a disabled ngx-mat-select-search input. On the
+        # live portal the real ICD options can arrive a moment later; reading too
+        # early sees only the blank search row and falsely fails.
+        page.wait_for_function("document.querySelectorAll('mat-option:not(.mat-option-disabled)').length > 0", timeout=20000)
         page.wait_for_timeout(300)
-        options = page.locator('mat-option')
-        options.first.wait_for(state='visible', timeout=15000)
-        option_texts = options.all_inner_texts()
+        options = page.locator('mat-option:not(.mat-option-disabled)')
+        option_texts = [t.strip() for t in options.all_inner_texts()]
         for candidate in expanded:
             needle = candidate.split(' - ')[0].strip()
             match = options.filter(has_text=needle).first
@@ -339,10 +588,26 @@ class Doc2UsLiveRunner:
 
     def _continue_and_submit_questionnaire(self, page, row: pd.Series) -> None:
         # Site labels have changed before, so use progressive button clicks and fill common questionnaire fields when present.
-        for text in ['CONTINUE', 'Continue', 'NEXT', 'Next']:
-            if self._click_text_if_visible(page, text, timeout=2500):
+        # On slower Render instances, a broad `Continue` text click can leave the
+        # page on the medication screen with an `Information Please` modal. Click
+        # the concrete questionnaire button first, acknowledge any info modal, and
+        # wait for the questionnaire route/fields before deciding it failed.
+        continued = False
+        for text in ['Continue To Screening Questionnaire', 'CONTINUE', 'Continue', 'NEXT', 'Next']:
+            if self._click_text_if_visible(page, text, timeout=4000):
+                continued = True
+                page.wait_for_timeout(1000)
+                popup = page.locator('ngb-modal-window').last
+                if popup.count() and popup.get_by_role('button', name='OK').count():
+                    popup.get_by_role('button', name='OK').click(force=True)
+                    page.wait_for_timeout(700)
                 break
-        page.wait_for_timeout(1500)
+        if continued:
+            try:
+                page.wait_for_url('**/screening-questionnaire**', timeout=12000)
+            except Exception:
+                # Some deployments update the DOM before URL matching settles.
+                page.wait_for_timeout(1500)
 
         body_text = page.locator('body').inner_text(timeout=5000)
         # Fill screening questionnaire required fields. Doc2Us keeps previous
@@ -391,10 +656,10 @@ class Doc2UsLiveRunner:
         raise RuntimeError('Medication record filled, but no final request/submit button was found. Page text: ' + body_text[:800])
 
 
-def submit_doc2us_queue_live(queue_path: str | Path, screenshot_dir: str | Path, final_submit: bool = True) -> dict[str, Any]:
+def submit_doc2us_queue_live(queue_path: str | Path, screenshot_dir: str | Path, final_submit: bool = True, progress_callback: Callable[[dict[str, Any]], None] | None = None, login_email: str | None = None, login_password: str | None = None, account_label: str = '') -> dict[str, Any]:
     queue = pd.read_excel(queue_path, sheet_name='DOC2US_READY_UPLOAD', dtype=object)
-    runner = Doc2UsLiveRunner(screenshot_dir=screenshot_dir, headless=True, final_submit=final_submit)
-    result = runner.run_queue(queue)
+    runner = Doc2UsLiveRunner(screenshot_dir=screenshot_dir, headless=True, final_submit=final_submit, login_email=login_email, login_password=login_password, account_label=account_label)
+    result = runner.run_queue(queue, progress_callback=progress_callback)
     return {
         'submitted_count': result.submitted_count,
         'failed_count': result.failed_count,
