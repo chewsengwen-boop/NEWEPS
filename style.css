@@ -1,321 +1,470 @@
-#!/usr/bin/env python3
-"""
-EPS / Doc2Us bulk medication-record helper.
-
-Default mode is DRY RUN. It reads an Octopus poison B/C transaction Excel, matches
-medications against medication_rules.csv, computes EPS-ready fields, and writes an
-output workbook for pharmacist review.
-
-Live submission mode uses Playwright UI automation to login, register missing
-patients, create medication records, fill the LTM screening questionnaire, and
-submit only rows whose rule says allowed=yes.
-
-Pharmacist name and registration number are required at runtime; they are not read
-from the raw transaction file.
-"""
 from __future__ import annotations
 
-import argparse, csv, datetime as dt, json, math, os, re, sys, time
-from dataclasses import dataclass, asdict
+import os
+import shutil
+import uuid
+import csv
+import json
+from datetime import datetime, timezone
+from html import escape
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Any
 
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parent
-RULES_PATH = ROOT / 'medication_rules.csv'
+from . import eps_bulk_core
+from .doc2us_live import submit_doc2us_queue_live
 
-DEFAULTS = {
-    'bp': '120/80', 'hr': '75', 'glucose': '6.0', 'temperature': '0',
-    'height': '0', 'weight': '0', 'hba1c': '0', 'ldl': '0', 'egfr': '0',
-    'allergy': 'NKDA', 'follow_up_under': 'klinik kesihatan',
-    'remarks': 'refill medication', 'mode': 'LTM', 'default_email_domain': 'doc2us.com',
+EDITABLE_COLUMNS = [
+    'status', 'skip_reason', 'patient_name', 'patient_ic', 'mobile', 'email', 'item_name', 'active_ingredients', 'indication',
+    'diagnosis_search', 'doc2us_icd_code', 'doc2us_indication', 'route', 'dose', 'dose_unit', 'frequency', 'duration_days', 'prescribed_amount',
+    'prescribed_unit', 'drug_remark', 'questionnaire_mode', 'bp', 'hr', 'glucose', 'last_appointment_date',
+    'next_appointment_date', 'follow_up_under', 'referred_by', 'pharmacist_reg_no', 'screening_remarks'
+]
+NUMERIC_COLUMNS = {'qty', 'duration_days', 'prescribed_amount'}
+DOC2US_DEPLOY_COLUMNS = [
+    'status', 'patient_name', 'patient_ic', 'mobile', 'email',
+    'item_name', 'active_ingredients', 'indication', 'doc2us_icd_code', 'doc2us_indication', 'diagnosis_search',
+    'route', 'dose', 'dose_unit', 'frequency', 'duration_days', 'prescribed_amount', 'prescribed_unit', 'drug_remark',
+    'questionnaire_mode', 'bp', 'hr', 'glucose', 'last_appointment_date', 'next_appointment_date',
+    'follow_up_under', 'referred_by', 'pharmacist_reg_no', 'screening_remarks'
+]
+REQUIRED_DOC2US_FIELDS = {
+    'patient_name': 'Patient name is required',
+    'patient_ic': 'Patient IC is required',
+    'mobile': 'Mobile number is required',
+    'item_name': 'Medication item name is required',
+    'active_ingredients': 'Active ingredient must be reviewed',
+    'doc2us_icd_code': 'Doc2Us indication dropdown must be selected',
+    'doc2us_indication': 'Doc2Us indication text must be selected',
+    'route': 'Route is required',
+    'dose': 'Dose is required',
+    'dose_unit': 'Dose unit is required',
+    'frequency': 'Frequency is required',
+    'duration_days': 'Duration days must be more than 0',
+    'prescribed_amount': 'Prescribed amount must be more than 0',
+    'prescribed_unit': 'Prescribed unit is required',
+    'questionnaire_mode': 'Minor Ailment / LTM mode is required',
+    'bp': 'BP is required',
+    'next_appointment_date': 'Next appointment date is required',
+    'follow_up_under': 'Follow up under is required',
+    'referred_by': 'Referred by is required',
+    'pharmacist_reg_no': 'Pharmacist registration number is required',
+    'screening_remarks': 'Screening remarks are required',
 }
 
-@dataclass
-class Rule:
-    pattern: str
-    active_ingredients: str
-    klass: str
-    allowed: str
-    indication: str
-    diagnosis_search: str
-    doc2us_icd_code: str
-    doc2us_indication: str
-    route: str
-    dose: str
-    unit: str
-    frequency: str
-    days_per_pack: float
-    max_days: int
-    max_qty: Optional[float]
-    poct: str
-    drug_remark_template: str
-    skip_reason: str
-
-@dataclass
-class PlanRow:
-    status: str
-    skip_reason: str
-    store: str
-    patient_name: str
-    patient_ic: str
-    gender: str
-    mobile: str
-    email: str
-    item_code: str
-    item_name: str
-    qty: float
-    rule_pattern: str
-    medication_class: str
-    indication: str
-    diagnosis_search: str
-    route: str
-    dose: str
-    dose_unit: str
-    frequency: str
-    duration_days: int
-    prescribed_amount: int
-    prescribed_unit: str
-    active_ingredients: str
-    doc2us_icd_code: str
-    doc2us_indication: str
-    drug_remark: str
-    questionnaire_mode: str
-    bp: str
-    hr: str
-    glucose: str
-    last_appointment_date: str
-    next_appointment_date: str
-    follow_up_under: str
-    referred_by: str
-    pharmacist_reg_no: str
-    screening_remarks: str
 
 
-def clean(v) -> str:
-    if pd.isna(v): return ''
-    s = str(v).strip()
-    if s.endswith('.0') and s[:-2].isdigit(): s = s[:-2]
-    return s
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec='seconds')
 
 
-def norm_name(s: str) -> str:
-    return re.sub(r'[^A-Z0-9]+', ' ', s.upper()).strip()
+def _deployment_progress_path(jobs_dir: str | Path, job_id: str) -> Path:
+    return _safe_job_dir(jobs_dir, job_id) / 'doc2us_deployment_progress.json'
 
 
-def parse_pack_count(item_name: str) -> Optional[int]:
-    """Extract common pack count: 2X15S=30, 4X7S=28, 12S=12, 1S=1."""
-    s = item_name.upper()
-    m = re.search(r'(\d+)\s*[Xx]\s*(\d+)\s*S\b', s)
-    if m: return int(m.group(1)) * int(m.group(2))
-    # prefer standalone pack tokens such as "12S" or "4S". Strengths like 100MG do not end in S.
-    matches = re.findall(r'(?<![A-Z0-9/])(\d+)\s*S\b', s)
-    if matches:
-        return int(matches[-1])
-    return None
+def write_deployment_progress(jobs_dir: str | Path, job_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    progress = dict(data)
+    progress['job_id'] = job_id
+    progress['updated_at'] = _utc_now()
+    path = _deployment_progress_path(jobs_dir, job_id)
+    path.write_text(json.dumps(progress, indent=2, ensure_ascii=False), encoding='utf-8')
+    return progress
 
 
-def load_rules(path: Path = RULES_PATH) -> List[Rule]:
-    rows=[]
+def read_deployment_progress(jobs_dir: str | Path, job_id: str) -> dict[str, Any]:
+    path = _deployment_progress_path(jobs_dir, job_id)
+    if path.exists():
+        return json.loads(path.read_text(encoding='utf-8'))
+    return {'job_id': job_id, 'status': 'not_started', 'event': 'not_started', 'results': [], 'updated_at': ''}
+
+def doc2us_deploy_columns() -> list[str]:
+    return list(DOC2US_DEPLOY_COLUMNS)
+
+
+def _blank(value: object) -> bool:
+    return pd.isna(value) or str(value).strip() == ''
+
+
+def _positive_number(value: object) -> bool:
+    try:
+        return float(value) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def validate_doc2us_ready_row(row: pd.Series) -> list[str]:
+    issues: list[str] = []
+    for col, message in REQUIRED_DOC2US_FIELDS.items():
+        if col in {'duration_days', 'prescribed_amount'}:
+            if not _positive_number(row.get(col)):
+                issues.append(message)
+        elif _blank(row.get(col)):
+            issues.append(message)
+    mode = str(row.get('questionnaire_mode', '')).strip().upper()
+    if mode and mode not in {'LTM', 'MINOR AILMENT', 'MINOR_AILMENT'}:
+        issues.append('Questionnaire mode must be LTM or Minor Ailment')
+    bp = str(row.get('bp', '')).strip()
+    if bp and '/' not in bp:
+        issues.append('BP must be in systolic/diastolic format')
+    return issues
+
+
+def load_doc2us_indication_options() -> list[tuple[str, str]]:
+    """Doc2Us default EPS indication dropdown options harvested from /Api/Icd/GetDefaultIcdsForEPS.
+
+    Kept as a local controlled list so the app can work offline and pharmacists can review the AI-preselected choice.
+    """
+    path = Path(__file__).resolve().parents[1] / 'data' / 'doc2us_default_indications.csv'
     with open(path, newline='', encoding='utf-8-sig') as f:
-        for r in csv.DictReader(f):
-            rows.append(Rule(
-                pattern=r['pattern'].upper(), active_ingredients=r.get('active_ingredients', r['pattern']).upper(),
-                klass=r['class'], allowed=r['allowed'].lower(),
-                indication=r['indication'], diagnosis_search=r['diagnosis_search'],
-                doc2us_icd_code=r.get('doc2us_icd_code', ''), doc2us_indication=r.get('doc2us_indication', ''),
-                route=r['route'],
-                dose=r['dose'], unit=r['unit'], frequency=r['frequency'],
-                days_per_pack=float(r['days_per_pack'] or 0), max_days=int(float(r['max_days'] or 0)),
-                max_qty=float(r['max_qty']) if r.get('max_qty') else None,
-                poct=r['poct'], drug_remark_template=r['drug_remark_template'], skip_reason=r['skip_reason']))
-    return rows
+        return [(r['icd_code'], r['icd_description']) for r in csv.DictReader(f)]
 
 
-def match_rule(item_name: str, rules: List[Rule]) -> Optional[Rule]:
-    n = norm_name(item_name)
-    for r in rules:
-        if r.pattern and r.pattern in n:
-            return r
-    return None
+def render_indication_select(row_idx: int, selected_code: str, selected_text: str = '') -> str:
+    selected_code = str(selected_code or '').strip()
+    selected_text = str(selected_text or '').strip()
+    options = ['<option value="">-- pharmacist choose Doc2Us indication --</option>']
+    found = False
+    for code, desc in load_doc2us_indication_options():
+        is_selected = code == selected_code or (not selected_code and desc == selected_text)
+        if is_selected:
+            found = True
+        selected_attr = 'selected' if is_selected else ''
+        options.append(
+            f'<option value="{escape(code)}" data-desc="{escape(desc)}" {selected_attr}>'
+            f'{escape(code)} - {escape(desc)}</option>'
+        )
+    if selected_code and not found:
+        options.insert(1, f'<option value="{escape(selected_code)}" data-desc="{escape(selected_text)}" selected>{escape(selected_code)} - {escape(selected_text)}</option>')
+    hidden = f'<input type="hidden" name="row_{row_idx}_doc2us_indication" value="{escape(selected_text)}">'
+    html_options = ''.join(options)
+    return f'<select name="row_{row_idx}_doc2us_icd_code">{html_options}</select>{hidden}'
 
 
-def read_octopus_excel(path: str) -> pd.DataFrame:
-    raw = pd.read_excel(path, header=None, dtype=object)
-    header_idx = None
-    for i in range(len(raw)):
-        vals = [clean(x) for x in raw.iloc[i].tolist()]
-        if 'Client IC' in vals and 'Item Name' in vals:
-            header_idx = i; break
-    if header_idx is None:
-        raise ValueError('Could not find Octopus header row containing Client IC and Item Name')
-    header = [clean(x) for x in raw.iloc[header_idx].tolist()]
-    df = raw.iloc[header_idx+1:].copy()
-    df.columns = header
-    df = df.dropna(how='all')
-    # remove total rows
-    df = df[~df.get('Store','').astype(str).str.contains('Total', case=False, na=False)]
-    df = df[~df.get('Client Mobile','').astype(str).str.contains('Total', case=False, na=False)]
-    df = df[df.get('Client IC','').notna() & df.get('Item Name','').notna()]
-    return df
+def _allowed_logins() -> dict[str, str]:
+    """Pilot shared-app login list.
+
+    Default enables the first approved Doc2Us/EPS account. On deployment, set
+    EPS_ALLOWED_EMAIL and EPS_ALLOWED_PASSWORD environment variables so the
+    password is not hardcoded in platform configuration/history.
+    """
+    email = os.environ.get('EPS_ALLOWED_EMAIL', 'qsbjc1@alpropharmacy.com').strip().lower()
+    password = os.environ.get('EPS_ALLOWED_PASSWORD', 'Alpro-123')
+    return {email: password}
 
 
-def infer_dob_from_ic(ic: str) -> str:
-    digits = re.sub(r'\D','', ic)
-    if len(digits) < 6: return ''
-    yy, mm, dd = int(digits[:2]), int(digits[2:4]), int(digits[4:6])
-    current_yy = dt.date.today().year % 100
-    year = 2000 + yy if yy <= current_yy else 1900 + yy
-    try: return dt.date(year, mm, dd).isoformat()
-    except ValueError: return ''
+def authenticate(email: str, password: str) -> bool:
+    """Temporary shared-app login: accept only the approved EPS pilot account."""
+    return _allowed_logins().get((email or '').strip().lower()) == (password or '')
 
 
-def gender_word(g: str) -> str:
-    g = clean(g).upper()
-    return 'Male' if g == 'M' else 'Female' if g == 'F' else g.title()
+def make_job_id() -> str:
+    return uuid.uuid4().hex
 
 
-def make_plan(input_xlsx: str, pharmacist_name: str, reg_no: str, apply_date: dt.date) -> pd.DataFrame:
-    rules = load_rules()
-    src = read_octopus_excel(input_xlsx)
-    out: List[PlanRow] = []
-    for _, row in src.iterrows():
-        item = clean(row.get('Item Name'))
-        qty = float(row.get('Qty') or 0)
-        rule = match_rule(item, rules)
-        ic = re.sub(r'\D','', clean(row.get('Client IC')))
-        email = f'{ic}@{DEFAULTS["default_email_domain"]}' if ic else ''
-        patient_name = clean(row.get('Client Name')).replace('(F)', '').strip()
-        pack = parse_pack_count(item)
-        if rule is None:
-            status, reason = 'REVIEW', 'No medication rule matched; pharmacist must add rule before live submit'
-            # safe defaults only for report visibility
-            rule = Rule('', '', '', 'review', '', '', '', '', 'Oral', '1', 'tab(s)/cap(s)', '', 0, 0, None, 'BP;HR', '', reason)
-            duration = 0; amount = int(qty) if qty else 0
-        elif rule.allowed == 'omit':
-            status, reason = 'OMIT', rule.skip_reason or 'Medication rule is marked omit'
-            duration = 0; amount = int((pack or 1) * qty) if qty else 0
-        else:
-            status, reason = 'READY', ''
-            # amount = tablets/capsules if pack count is known, else sold qty
-            amount_f = (pack * qty) if pack else qty
-            amount = int(math.ceil(amount_f)) if amount_f else 1
-            daily_units = float(rule.dose or 1)
-            # crude frequency multiplier for duration calculation
-            freq = rule.frequency.lower()
-            if 'twice' in freq: daily_units *= 2
-            elif 'three' in freq: daily_units *= 3
-            elif 'four' in freq: daily_units *= 4
-            duration = int(math.ceil(amount / max(daily_units, 1)))
-            if rule.days_per_pack and not pack:
-                duration = int(math.ceil(rule.days_per_pack * qty))
-            if rule.max_qty and amount > rule.max_qty:
-                status, reason = 'REVIEW', f'Prescribed amount {amount} exceeds handbook/rule max {rule.max_qty}'
-            if rule.max_days and duration > rule.max_days:
-                duration = rule.max_days
-                reason = (reason + '; ' if reason else '') + f'Duration capped at {rule.max_days} days by rule'
-        next_date = apply_date + dt.timedelta(days=max(duration, 1))
-        out.append(PlanRow(
-            status=status, skip_reason=reason, store=clean(row.get('Store')), patient_name=patient_name,
-            patient_ic=ic, gender=gender_word(row.get('Client Gender')), mobile=clean(row.get('Client Mobile')),
-            email=email, item_code=clean(row.get('Item Code')), item_name=item, qty=qty,
-            rule_pattern=rule.pattern, medication_class=rule.klass, indication=rule.indication,
-            diagnosis_search=rule.diagnosis_search, route=rule.route, dose=rule.dose,
-            dose_unit=rule.unit, frequency=rule.frequency, duration_days=duration,
-            prescribed_amount=amount, prescribed_unit='tablet(s)',
-            active_ingredients=rule.active_ingredients, doc2us_icd_code=rule.doc2us_icd_code,
-            doc2us_indication=rule.doc2us_indication,
-            drug_remark=rule.drug_remark_template or DEFAULTS['remarks'],
-            questionnaire_mode=DEFAULTS['mode'], bp=DEFAULTS['bp'], hr=DEFAULTS['hr'], glucose=DEFAULTS['glucose'],
-            last_appointment_date=apply_date.isoformat(), next_appointment_date=next_date.isoformat(),
-            follow_up_under=DEFAULTS['follow_up_under'], referred_by=pharmacist_name,
-            pharmacist_reg_no=reg_no, screening_remarks=DEFAULTS['remarks']))
-    return pd.DataFrame([asdict(x) for x in out])
-
-# UI helpers are intentionally conservative and text-based because EPS is Angular Material.
-def run_live(plan: pd.DataFrame, eps_email: str, eps_password: str, chromium: str, headless: bool, limit: int):
-    from playwright.sync_api import sync_playwright
-    ready = plan[plan.status == 'READY'].head(limit)
-    results=[]
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless, executable_path=chromium)
-        page = browser.new_page(viewport={'width':1400,'height':1000})
-        page.goto('https://eps.doc2us.com/login', wait_until='domcontentloaded')
-        page.wait_for_timeout(1500)
-        page.locator('input').nth(0).fill(eps_email)
-        page.locator('input').nth(1).fill(eps_password)
-        page.get_by_text('SIGN IN').click(); page.wait_for_timeout(5000)
-        for idx, r in ready.iterrows():
-            try:
-                submit_one(page, r)
-                results.append((idx, 'SUBMITTED', ''))
-            except Exception as e:
-                results.append((idx, 'ERROR', str(e)[:500]))
-        browser.close()
-    return results
-
-def select_text(page, label_text):
-    page.get_by_text(label_text, exact=False).first.click(); page.wait_for_timeout(300)
-
-def submit_one(page, r):
-    # This routine is best-effort; if EPS changes labels, use --dry-run output and manual submit.
-    page.goto('https://eps.doc2us.com/medication-record', wait_until='domcontentloaded'); page.wait_for_timeout(1500)
-    page.locator('input').first.fill(str(r.patient_ic)); page.keyboard.press('Enter'); page.wait_for_timeout(2500)
-    body = page.locator('body').inner_text()
-    if 'No Patient Found' in body:
-        page.get_by_text('Register New Patient').click(); page.wait_for_timeout(2000)
-        ins = page.locator('input')
-        ins.nth(0).fill(r.email); ins.nth(1).fill('sibu'); ins.nth(2).fill(r.patient_name); ins.nth(3).fill(str(r.patient_ic))
-        ins.nth(4).fill(infer_dob_from_ic(str(r.patient_ic)))
-        if str(r.gender).lower().startswith('m'): ins.nth(6).check(force=True)
-        else: ins.nth(5).check(force=True)
-        ins.nth(7).fill(str(r.mobile)); ins.nth(8).fill('Alpro-123'); ins.nth(10).fill('Alpro-123')
-        ins.nth(12).check(force=True)
-        page.evaluate("document.querySelectorAll('input')[14].click()")
-        page.get_by_text('Submit', exact=True).click(); page.wait_for_timeout(3000)
-        if 'Saved successfully' not in page.locator('body').inner_text():
-            raise RuntimeError('Patient registration failed: ' + page.locator('body').inner_text()[-500:])
-    # Locate profile and create medication. Implementation uses known EPS flow; review dry-run first.
-    page.goto('https://eps.doc2us.com/medication-record', wait_until='domcontentloaded'); page.wait_for_timeout(1500)
-    page.locator('input').first.fill(str(r.patient_ic)); page.keyboard.press('Enter'); page.wait_for_timeout(2500)
-    page.get_by_text('Medication Record', exact=True).last.click(); page.wait_for_timeout(2500)
-    # At this point EPS may expose New Medication; exact selectors vary by version.
-    page.get_by_text('New Medication Record', exact=False).click(); page.wait_for_timeout(2000)
-    # Fillers below are intentionally minimal; generated plan is the source of truth.
-    raise RuntimeError('Live submit scaffold reached; finish mapping selectors in your outlet browser after dry-run review')
+def _safe_job_dir(jobs_dir: str | Path, job_id: str) -> Path:
+    if not job_id or not str(job_id).isalnum():
+        raise ValueError('Invalid job id')
+    job_dir = Path(jobs_dir) / job_id
+    if not job_dir.exists():
+        raise FileNotFoundError('Job not found')
+    return job_dir
 
 
-def main():
-    ap = argparse.ArgumentParser(description='EPS Doc2Us bulk transaction-to-prescription automation')
-    ap.add_argument('--input', required=True, help='Octopus poison transaction Excel file')
-    ap.add_argument('--output', default='', help='Output review workbook path')
-    ap.add_argument('--pharmacist-name', required=True)
-    ap.add_argument('--reg-no', required=True)
-    ap.add_argument('--apply-date', default=dt.date.today().isoformat())
-    ap.add_argument('--live-submit', action='store_true', help='Actually submit READY rows to EPS. Default is dry-run only.')
-    ap.add_argument('--eps-email', default=os.getenv('EPS_EMAIL',''))
-    ap.add_argument('--eps-password', default=os.getenv('EPS_PASSWORD',''))
-    ap.add_argument('--chromium', default='/snap/bin/chromium')
-    ap.add_argument('--headless', action='store_true')
-    ap.add_argument('--limit', type=int, default=9999)
-    args = ap.parse_args()
-    apply_date = dt.date.fromisoformat(args.apply_date)
-    plan = make_plan(args.input, args.pharmacist_name, args.reg_no, apply_date)
-    out = args.output or str(Path(args.input).with_name(Path(args.input).stem + '_EPS_PLAN.xlsx'))
-    with pd.ExcelWriter(out, engine='openpyxl') as w:
+def _plan_path(job_dir: Path) -> Path:
+    files = list(job_dir.glob('*_EPS_PLAN.xlsx'))
+    if not files:
+        raise FileNotFoundError('Plan workbook not found')
+    return files[0]
+
+
+def _write_plan_workbook(plan: pd.DataFrame, output_path: Path) -> None:
+    plan = plan.copy()
+    if 'status' not in plan.columns:
+        plan['status'] = 'REVIEW'
+    if 'medication_class' not in plan.columns:
+        plan['medication_class'] = ''
+    with pd.ExcelWriter(output_path, engine='openpyxl') as w:
         plan.to_excel(w, index=False, sheet_name='EPS_PLAN')
-        plan.groupby(['status','medication_class'], dropna=False).size().reset_index(name='count').to_excel(w, index=False, sheet_name='SUMMARY')
-    print(f'Wrote review workbook: {out}')
-    print(plan['status'].value_counts(dropna=False).to_string())
-    if args.live_submit:
-        if not args.eps_email or not args.eps_password:
-            raise SystemExit('--live-submit requires --eps-email/--eps-password or EPS_EMAIL/EPS_PASSWORD env vars')
-        results = run_live(plan, args.eps_email, args.eps_password, args.chromium, args.headless, args.limit)
-        resdf = pd.DataFrame(results, columns=['row_index','submit_status','message'])
-        resout = str(Path(out).with_name(Path(out).stem + '_SUBMIT_RESULTS.xlsx'))
-        resdf.to_excel(resout, index=False)
-        print(f'Wrote submit results: {resout}')
+        plan.groupby(['status', 'medication_class'], dropna=False).size().reset_index(name='count').to_excel(
+            w, index=False, sheet_name='SUMMARY'
+        )
 
-if __name__ == '__main__':
-    main()
+
+def _job_summary(job_id: str, output_path: Path, plan: pd.DataFrame) -> Dict[str, Any]:
+    counts = {str(k): int(v) for k, v in plan['status'].value_counts(dropna=False).to_dict().items()}
+    preview_cols = ['status','skip_reason','patient_name','patient_ic','item_name','qty','medication_class','indication','frequency','duration_days','prescribed_amount','next_appointment_date']
+    preview = plan[[c for c in preview_cols if c in plan.columns]].fillna('').to_dict(orient='records')
+    return {
+        'job_id': job_id,
+        'output_path': str(output_path),
+        'download_name': output_path.name,
+        'counts': counts,
+        'preview': preview,
+    }
+
+
+def load_plan(jobs_dir: str | Path, job_id: str) -> pd.DataFrame:
+    job_dir = _safe_job_dir(jobs_dir, job_id)
+    return pd.read_excel(_plan_path(job_dir), sheet_name='EPS_PLAN', dtype=object)
+
+
+def process_upload(
+    file_bytes: bytes,
+    original_filename: str,
+    pharmacist_name: str,
+    reg_no: str,
+    apply_date: str,
+    jobs_dir: str | Path,
+) -> Dict[str, Any]:
+    jobs_dir = Path(jobs_dir)
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+    job_id = make_job_id()
+    job_dir = jobs_dir / job_id
+    job_dir.mkdir()
+    safe_name = Path(original_filename or 'upload.xlsx').name
+    input_path = job_dir / safe_name
+    input_path.write_bytes(file_bytes)
+
+    # The core module expects its medication_rules.csv beside itself. Use shared web data rules.
+    web_rules = Path(__file__).resolve().parents[1] / 'data' / 'medication_rules.csv'
+    core_rules = Path(eps_bulk_core.__file__).resolve().parent / 'medication_rules.csv'
+    if web_rules.exists() and not core_rules.exists():
+        shutil.copy2(web_rules, core_rules)
+
+    plan = eps_bulk_core.make_plan(str(input_path), pharmacist_name, reg_no, pd.to_datetime(apply_date).date())
+    output_path = job_dir / f'{input_path.stem}_EPS_PLAN.xlsx'
+    _write_plan_workbook(plan, output_path)
+    summary = _job_summary(job_id, output_path, plan)
+    summary['input_path'] = str(input_path)
+    return summary
+
+
+def save_edited_plan(jobs_dir: str | Path, job_id: str, edits: dict[str, dict[str, str]]) -> Dict[str, Any]:
+    job_dir = _safe_job_dir(jobs_dir, job_id)
+    output_path = _plan_path(job_dir)
+    plan = pd.read_excel(output_path, sheet_name='EPS_PLAN', dtype=object)
+    for col in EDITABLE_COLUMNS:
+        if col not in plan.columns:
+            plan[col] = ''
+    text_columns = [c for c in EDITABLE_COLUMNS if c not in NUMERIC_COLUMNS and c in plan.columns]
+    for col in text_columns:
+        plan[col] = plan[col].astype(object)
+    for row_key, values in edits.items():
+        if not str(row_key).isdigit():
+            continue
+        idx = int(row_key)
+        if idx not in plan.index:
+            continue
+        for col in EDITABLE_COLUMNS:
+            if col not in values or col not in plan.columns:
+                continue
+            val = values[col]
+            if col == 'status':
+                val = str(val or '').strip().upper()
+                if val not in {'READY', 'REVIEW', 'OMIT'}:
+                    val = 'REVIEW'
+            elif col in NUMERIC_COLUMNS:
+                try:
+                    val = int(float(val)) if str(val).strip() != '' else 0
+                except ValueError:
+                    val = 0
+            else:
+                val = str(val or '').strip()
+            plan.at[idx, col] = val
+    _write_plan_workbook(plan, output_path)
+    return _job_summary(job_id, output_path, plan)
+
+
+def _load_doc2us_queue(path: str | Path) -> pd.DataFrame:
+    try:
+        return pd.read_excel(path, sheet_name='DOC2US_READY_UPLOAD')
+    except ValueError:
+        return pd.read_excel(path)
+
+
+def _normalise_deploy_frame(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for col in DOC2US_DEPLOY_COLUMNS:
+        if col not in out.columns:
+            out[col] = ''
+    out = out[DOC2US_DEPLOY_COLUMNS]
+    out['status'] = out['status'].fillna('READY').astype(str).str.upper().replace({'': 'READY'})
+    return out
+
+
+def import_edited_doc2us_queue(
+    jobs_dir: str | Path,
+    job_id: str,
+    file_bytes: bytes,
+    original_filename: str,
+) -> Dict[str, Any]:
+    job_dir = _safe_job_dir(jobs_dir, job_id)
+    safe_name = Path(original_filename or 'edited_doc2us_queue.xlsx').name
+    import_path = job_dir / f'imported_{safe_name}'
+    import_path.write_bytes(file_bytes)
+    imported = _normalise_deploy_frame(_load_doc2us_queue(import_path))
+    plan_path = _plan_path(job_dir)
+    plan = pd.read_excel(plan_path, sheet_name='EPS_PLAN')
+    imported_count = 0
+    invalid_count = 0
+    for _, row in imported.iterrows():
+        patient_ic = str(row.get('patient_ic', '')).strip()
+        item_name = str(row.get('item_name', '')).strip()
+        if not patient_ic or not item_name:
+            invalid_count += 1
+            continue
+        matches = plan[(plan['patient_ic'].astype(str).str.strip() == patient_ic) & (plan['item_name'].astype(str).str.strip() == item_name)]
+        if matches.empty:
+            new_row = {col: '' for col in plan.columns}
+            for col in imported.columns:
+                if col in new_row:
+                    new_row[col] = row.get(col, '')
+            new_row['skip_reason'] = ''
+            plan = pd.concat([plan, pd.DataFrame([new_row])], ignore_index=True)
+            target_idx = plan.index[-1]
+        else:
+            target_idx = matches.index[0]
+            for col in imported.columns:
+                if col in plan.columns:
+                    plan.at[target_idx, col] = row.get(col, '')
+        issues = validate_doc2us_ready_row(plan.loc[target_idx])
+        if issues:
+            invalid_count += 1
+            plan.at[target_idx, 'status'] = 'REVIEW'
+            plan.at[target_idx, 'skip_reason'] = '; '.join(issues)
+        else:
+            plan.at[target_idx, 'status'] = 'READY'
+            plan.at[target_idx, 'skip_reason'] = ''
+        imported_count += 1
+    _write_plan_workbook(plan, plan_path)
+    package = create_submit_package(jobs_dir, job_id)
+    return {
+        'job_id': job_id,
+        'import_path': str(import_path),
+        'imported_count': int(imported_count),
+        'invalid_count': int(invalid_count),
+        'queue_path': package['queue_path'],
+        'ready_count': package['count'],
+    }
+
+
+def deploy_doc2us_ready_rows(jobs_dir: str | Path, job_id: str, live_submit: bool = False) -> Dict[str, Any]:
+    """Prepare or execute the end-phase Doc2Us deployment result.
+
+    One READY medication row equals one prescription request. live_submit=True runs
+    the Playwright browser automation against Doc2Us EPS and records per-row results.
+    """
+    job_dir = _safe_job_dir(jobs_dir, job_id)
+    package = create_submit_package(jobs_dir, job_id)
+    manifest = build_doc2us_automation_manifest(package['queue_path'], dry_run=not live_submit)
+    manifest['live_submit_enabled'] = bool(live_submit)
+    manifest['prescription_count'] = int(package['count'])
+    manifest['medication_count'] = int(package['count'])
+    manifest['invalid_count'] = int(package.get('invalid_count', 0))
+    if live_submit and int(package['count']) > 0:
+        try:
+            def _progress(event: dict[str, Any]) -> None:
+                write_deployment_progress(jobs_dir, job_id, {'status': 'running', **event})
+
+            live = submit_doc2us_queue_live(
+                package['queue_path'],
+                screenshot_dir=job_dir / 'doc2us_live_screenshots',
+                final_submit=True,
+                progress_callback=_progress,
+            )
+        except Exception as exc:
+            live = {
+                'submitted_count': 0,
+                'failed_count': int(package.get('count', 0)),
+                'results': [
+                    {
+                        'row': '',
+                        'patient_ic': '',
+                        'medication': '',
+                        'status': 'FAILED',
+                        'error': f'Website deploy runner crashed before/while starting Doc2Us browser automation: {type(exc).__name__}: {exc}',
+                    }
+                ],
+                'screenshot_dir': str(job_dir / 'doc2us_live_screenshots'),
+            }
+        manifest.update(live)
+        manifest['batch_mode'] = True
+        manifest['login_count'] = 1
+        manifest['patient_group_count'] = int(_normalise_deploy_frame(_load_doc2us_queue(package['queue_path']))['patient_ic'].fillna('').astype(str).str.strip().nunique())
+        manifest['dry_run'] = False
+        verified = sum(1 for r in live.get('results', []) if str(r.get('status')) == 'VERIFIED')
+        manifest['verified_count'] = int(verified)
+        manifest['notification'] = (
+            f"Batch live Doc2Us submission finished with one Doc2Us login: {verified} medication record(s) verified, "
+            f"{int(live.get('failed_count', 0))} failed, across {manifest['patient_group_count']} patient group(s). "
+            f"{int(package.get('invalid_count', 0))} invalid READY row(s) moved back to REVIEW."
+        )
+        write_deployment_progress(jobs_dir, job_id, {'status': 'finished', 'event': 'finished', **manifest})
+    else:
+        manifest['notification'] = (
+            f"Doc2Us deployment prepared: {int(package['count'])} medication(s) / "
+            f"{int(package['count'])} prescription request(s). "
+            f"{int(package.get('invalid_count', 0))} invalid READY row(s) moved back to REVIEW."
+        )
+    manifest_path = Path(jobs_dir) / job_id / 'doc2us_deployment_manifest.json'
+    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding='utf-8')
+    return manifest
+
+
+def build_doc2us_automation_manifest(queue_path: str | Path, dry_run: bool = True) -> Dict[str, Any]:
+    queue_path = Path(queue_path)
+    queue = _normalise_deploy_frame(_load_doc2us_queue(queue_path))
+    steps: list[dict[str, Any]] = [{'action': 'login_doc2us_eps', 'url': 'https://eps.doc2us.com/login'}]
+    for idx, row in queue.iterrows():
+        patient = str(row.get('patient_name', '')).strip()
+        ic = str(row.get('patient_ic', '')).strip()
+        med = str(row.get('item_name', '')).strip()
+        steps.extend([
+            {'row': int(idx), 'patient_name': patient, 'patient_ic': ic, 'action': 'search_patient_by_ic'},
+            {'row': int(idx), 'patient_name': patient, 'patient_ic': ic, 'action': 'register_patient_if_missing', 'manual_review_required': True},
+            {'row': int(idx), 'patient_name': patient, 'patient_ic': ic, 'medication': med, 'action': 'fill_medication_record'},
+            {'row': int(idx), 'patient_name': patient, 'patient_ic': ic, 'medication': med, 'action': 'request_prescription_requires_manual_confirm', 'manual_confirm_button_required': True},
+        ])
+    return {
+        'queue_path': str(queue_path),
+        'dry_run': bool(dry_run),
+        'live_submit_enabled': False if dry_run else False,
+        'row_count': int(len(queue)),
+        'safety_note': 'Automation may fill/import data, but live prescription request requires pharmacist confirmation and Doctor approval.',
+        'steps': steps,
+    }
+
+
+def create_submit_package(jobs_dir: str | Path, job_id: str) -> Dict[str, Any]:
+    job_dir = _safe_job_dir(jobs_dir, job_id)
+    output_path = _plan_path(job_dir)
+    plan = pd.read_excel(output_path, sheet_name='EPS_PLAN')
+    invalid_count = 0
+    for idx, row in plan[plan['status'].astype(str).str.upper() == 'READY'].iterrows():
+        issues = validate_doc2us_ready_row(row)
+        if issues:
+            invalid_count += 1
+            plan.at[idx, 'status'] = 'REVIEW'
+            existing_reason = str(plan.at[idx, 'skip_reason'] or '').strip()
+            issue_text = '; '.join(issues)
+            plan.at[idx, 'skip_reason'] = f'{existing_reason}; {issue_text}' if existing_reason else issue_text
+    if invalid_count:
+        _write_plan_workbook(plan, output_path)
+    ready = plan[plan['status'].astype(str).str.upper() == 'READY'].copy()
+    for col in DOC2US_DEPLOY_COLUMNS:
+        if col not in ready.columns:
+            ready[col] = ''
+    ready = ready[DOC2US_DEPLOY_COLUMNS]
+    queue_path = job_dir / f'{output_path.stem}_DOC2US_READY_QUEUE.xlsx'
+    with pd.ExcelWriter(queue_path, engine='openpyxl') as w:
+        ready.to_excel(w, index=False, sheet_name='DOC2US_READY_UPLOAD')
+        pd.DataFrame({
+            'step': [
+                '1. Pharmacist checks every row in DOC2US_READY_UPLOAD.',
+                '2. Open Doc2Us EPS and create medication record for each patient.',
+                '3. Use active ingredient + Doc2Us indication fields to fill the diagnosis dropdown.',
+                '4. Submit only after final pharmacist confirmation; Doctor approval remains required.'
+            ]
+        }).to_excel(w, index=False, sheet_name='DEPLOY_CHECKLIST')
+    return {'job_id': job_id, 'queue_path': str(queue_path), 'count': int(len(ready)), 'invalid_count': int(invalid_count)}
