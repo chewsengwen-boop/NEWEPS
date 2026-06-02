@@ -133,8 +133,15 @@ def load_rules(path: Path = RULES_PATH) -> List[Rule]:
     return rows
 
 
-def match_rule(item_name: str, rules: List[Rule]) -> Optional[Rule]:
-    n = norm_name(item_name)
+def match_rule(item_name: str, rules: List[Rule], item_description: str = '') -> Optional[Rule]:
+    """Match either product name or Octopus Item Description.
+
+    Octopus poison B/C exports usually put the active ingredient in Item
+    Description. Matching this field lets the Review + Edit page pre-fill
+    Doc2Us indication/dose/frequency/duration from active ingredient even when
+    the trade/product name is new.
+    """
+    n = norm_name(' '.join([item_name or '', item_description or '']))
     for r in rules:
         if r.pattern and r.pattern in n:
             return r
@@ -182,8 +189,9 @@ def make_plan(input_xlsx: str, pharmacist_name: str, reg_no: str, apply_date: dt
     out: List[PlanRow] = []
     for _, row in src.iterrows():
         item = clean(row.get('Item Name'))
+        item_description = clean(row.get('Item Description'))
         qty = float(row.get('Qty') or 0)
-        rule = match_rule(item, rules)
+        rule = match_rule(item, rules, item_description)
         ic = re.sub(r'\D','', clean(row.get('Client IC')))
         email = f'{ic}@{DEFAULTS["default_email_domain"]}' if ic else ''
         patient_name = clean(row.get('Client Name')).replace('(F)', '').strip()
@@ -224,7 +232,7 @@ def make_plan(input_xlsx: str, pharmacist_name: str, reg_no: str, apply_date: dt
             diagnosis_search=rule.diagnosis_search, route=rule.route, dose=rule.dose,
             dose_unit=rule.unit, frequency=rule.frequency, duration_days=duration,
             prescribed_amount=amount, prescribed_unit='tablet(s)',
-            active_ingredients=rule.active_ingredients, doc2us_icd_code=rule.doc2us_icd_code,
+            active_ingredients=item_description or rule.active_ingredients or item, doc2us_icd_code=rule.doc2us_icd_code,
             doc2us_indication=rule.doc2us_indication,
             drug_remark=rule.drug_remark_template or DEFAULTS['remarks'],
             questionnaire_mode=DEFAULTS['mode'], bp=DEFAULTS['bp'], hr=DEFAULTS['hr'], glucose=DEFAULTS['glucose'],

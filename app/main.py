@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request, Form, File, UploadFile, HTTPException, Bac
 from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
-from .web_logic import authenticate, process_upload, load_plan, save_edited_plan, create_submit_package, EDITABLE_COLUMNS, render_indication_select, load_doc2us_indication_options, import_edited_doc2us_queue, build_doc2us_automation_manifest, deploy_doc2us_ready_rows, read_deployment_progress, write_deployment_progress
+from .web_logic import authenticate, process_upload, load_plan, save_edited_plan, create_submit_package, EDITABLE_COLUMNS, render_indication_select, load_doc2us_indication_options, import_edited_doc2us_queue, build_doc2us_automation_manifest, deploy_doc2us_ready_rows, read_deployment_progress, write_deployment_progress, get_staff_account_by_app_email
 
 BASE = Path(__file__).resolve().parents[1]
 JOBS_DIR = BASE / 'jobs'
@@ -101,10 +101,10 @@ def login_page(request: Request):
     err = f'<div class="err">{escape(error)}</div>' if error else ''
     body = f'''<main class="card">
 <h1>EPS Shared Automation</h1>
-<p>Use your Doc2Us/EPS login. Pilot account enabled first.</p>
+<p>Use your staff web-app login. Each staff login is linked to its own Doc2Us account.</p>
 {err}
 <form method="post" action="/login">
-<label>Email <input name="email" type="email" value="qsbjc1@alpropharmacy.com" required></label>
+<label>Email <input name="email" type="email" required></label>
 <label>Password <input name="password" type="password" required></label>
 <button type="submit">Login</button>
 </form>
@@ -116,7 +116,7 @@ def login_page(request: Request):
 @app.post('/login')
 def login(email: str = Form(...), password: str = Form(...)):
     if not authenticate(email, password):
-        return RedirectResponse('/?error=Invalid%20login.%20Pilot%20account%20only.', status_code=303)
+        return RedirectResponse('/?error=Invalid%20login.', status_code=303)
     resp = RedirectResponse('/upload', status_code=303)
     resp.set_cookie('eps_email', email, httponly=True, samesite='lax')
     return resp
@@ -180,8 +180,10 @@ def extract_row_edits(form) -> dict[str, dict[str, str]]:
 
 @app.post('/save/{job_id}', response_class=HTMLResponse)
 async def save(job_id: str, request: Request):
-    if not require_login(request):
+    app_email = require_login(request)
+    if not app_email:
         return RedirectResponse('/', status_code=303)
+    staff_account = get_staff_account_by_app_email(app_email)
     form = await request.form()
     save_edited_plan(JOBS_DIR, job_id, extract_row_edits(form))
     return render_review(job_id, request, 'Saved edits. You can now deploy READY rows to Doc2Us or keep editing/omitting rows.')
@@ -210,8 +212,9 @@ def render_deployment_result(job_id: str, result: dict) -> HTMLResponse:
 <span class="pill OMIT">Failed: {failed}</span>
 <span class="pill REVIEW">Patient groups: {escape(str(result.get('patient_group_count', '')))}</span>
 <span class="pill READY">Doc2Us login count: {escape(str(result.get('login_count', '1')))}</span>
+<span class="pill REVIEW">Staff: {escape(str(result.get('staff_label', '')))}</span>
 </div>
-<p>Batch mode uses one Doc2Us login/session for all READY rows. One medication equals one prescription request row.</p>
+<p>Batch mode uses one Doc2Us login/session for all READY rows. One medication equals one prescription request row. The Doc2Us account is linked to the logged-in staff.</p>
 <div class="safety"><b>Status:</b> {escape(str(result.get('notification', 'Live deployment completed.')))}</div>
 {result_table}
 <p class="small">Evidence folder: {escape(str(result.get('screenshot_dir', '')))}</p>
@@ -222,8 +225,10 @@ def render_deployment_result(job_id: str, result: dict) -> HTMLResponse:
 
 @app.post('/deploy/{job_id}', response_class=HTMLResponse)
 async def deploy(job_id: str, request: Request, background_tasks: BackgroundTasks):
-    if not require_login(request):
+    app_email = require_login(request)
+    if not app_email:
         return RedirectResponse('/', status_code=303)
+    staff_account = get_staff_account_by_app_email(app_email)
     form = await request.form()
     save_edited_plan(JOBS_DIR, job_id, extract_row_edits(form))
     package = create_submit_package(JOBS_DIR, job_id)
@@ -234,9 +239,11 @@ async def deploy(job_id: str, request: Request, background_tasks: BackgroundTask
         'submitted_count': 0,
         'failed_count': 0,
         'results': [],
-        'notification': 'Batch deployment queued. The system will login to Doc2Us once and process all READY rows.',
+        'staff_label': staff_account.get('staff_label', app_email) if staff_account else app_email,
+        'doc2us_account_email': staff_account.get('doc2us_email', '') if staff_account else '',
+        'notification': 'Batch deployment queued. The system will login to the assigned staff Doc2Us account once and process all READY rows.',
     })
-    background_tasks.add_task(deploy_doc2us_ready_rows, JOBS_DIR, job_id, True)
+    background_tasks.add_task(deploy_doc2us_ready_rows, JOBS_DIR, job_id, True, app_email)
     return RedirectResponse(f'/deploy-status/{escape(job_id)}', status_code=303)
 
 
@@ -260,8 +267,9 @@ def deploy_status(job_id: str, request: Request):
 <span class="pill REVIEW">Event: {escape(str(progress.get('event', '')))}</span>
 <span class="pill READY">Rows: {escape(str(progress.get('submitted_count', 0)))} / {escape(str(progress.get('total_rows', 0)))}</span>
 <span class="pill OMIT">Failed: {escape(str(progress.get('failed_count', 0)))}</span>
+<span class="pill REVIEW">Staff: {escape(str(progress.get('staff_label', '')))}</span>
 </div>
-<p class="note">This page auto-refreshes every 5 seconds. The browser automation keeps one Doc2Us login/session and processes all READY rows in batch. REVIEW and OMIT rows are excluded.</p>
+<p class="note">This page auto-refreshes every 5 seconds. The browser automation keeps one assigned staff Doc2Us login/session and processes all READY rows in batch. REVIEW and OMIT rows are excluded.</p>
 <div class="safety"><b>Current:</b> {escape(str(progress.get('notification') or progress.get('patient_ic') or progress.get('medication') or 'Starting...'))}</div>
 <p class="small">Updated: {escape(str(progress.get('updated_at', '')))}</p>
 {table}
@@ -314,7 +322,7 @@ async def import_queue(job_id: str, request: Request, queue_file: UploadFile = F
 <p>Invalid rows moved to REVIEW: {result['invalid_count']}</p>
 <div class="safety"><b>End phase ready:</b> The selected Excel has been validated. Press the button below to run the live Doc2Us browser automation. It will only report VERIFIED when the EPS Total Medication Record count increases after submit.</div>
 <form method="post" action="/deploy/{escape(job_id)}">
-  <button type="submit">Start Batch Deploy To Doc2Us EPS And Verify Record Count</button>
+  <button type="submit">Start Batch Deploy Using My Assigned Doc2Us Account</button>
 </form>
 <p class="rowactions"><a class="button secondary" href="/review/{escape(job_id)}">Back to Review</a></p>
 </main>'''
