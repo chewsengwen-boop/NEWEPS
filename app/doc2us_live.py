@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,6 +56,39 @@ def _env_login() -> tuple[str, str]:
     return email, password
 
 
+def _install_playwright_chromium() -> None:
+    """Download Playwright Chromium at runtime if Render build skipped it.
+
+    Render sometimes deploys with the Python package installed but without the
+    browser binary, producing BrowserType.launch: Executable doesn't exist.
+    Installing here is a last-resort self-heal so live deployment does not fail
+    permanently when the build command/cache is wrong.
+    """
+    env = os.environ.copy()
+    env.setdefault('PLAYWRIGHT_BROWSERS_PATH', str(Path.home() / '.cache' / 'ms-playwright'))
+    subprocess.run(
+        [sys.executable, '-m', 'playwright', 'install', 'chromium'],
+        check=True,
+        timeout=300,
+        env=env,
+    )
+
+
+def _launch_chromium(playwright, launch_args: dict[str, Any]):
+    try:
+        return playwright.chromium.launch(**launch_args)
+    except Exception as exc:
+        message = str(exc)
+        if "Executable doesn't exist" not in message and 'playwright install' not in message:
+            raise
+        # If an explicit system executable was selected and failed, retry once
+        # with bundled Playwright Chromium after installing it.
+        retry_args = dict(launch_args)
+        retry_args.pop('executable_path', None)
+        _install_playwright_chromium()
+        return playwright.chromium.launch(**retry_args)
+
+
 class Doc2UsLiveRunner:
     def __init__(self, screenshot_dir: str | Path, headless: bool = True, final_submit: bool = True):
         self.screenshot_dir = Path(screenshot_dir)
@@ -74,7 +109,7 @@ class Doc2UsLiveRunner:
                 if Path(candidate).exists():
                     launch_args['executable_path'] = candidate
                     break
-            browser = p.chromium.launch(**launch_args)
+            browser = _launch_chromium(p, launch_args)
             page = browser.new_page(viewport={'width': 1440, 'height': 1000})
             try:
                 self._login(page, email, password)
