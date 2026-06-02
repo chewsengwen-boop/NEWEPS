@@ -1,0 +1,30 @@
+REAL EPS SUBMISSION COMPLETED
+
+Source raw Excel:
+C:\Users\User\Downloads\Newest Doc2us_03-06-2026 (Web).xlsx
+
+Portal/account:
+https://eps.doc2us.com / https://neweps-ru1o.onrender.com workflow
+QSBFL1@alpropharmacy.com
+
+Verified submitted rows: 4
+Failed rows: 0
+
+Rows verified count 0 -> 1:
+1. JAMI ANAK DUKU / 761101135892 / #HOVID HOVASC 5MG 10S
+2. JEFFERY SIA MING HONG / 000704131157 / VOZAN 20MG FILM COATED TABLETS 3X10S
+3. KONG KIM HO / 790728135127 / #HOVID HOVASC 10MG 10S
+4. SIM MOI HONG / 870821526536 / NORGESIC 35/450MG 12S (NEW) BOX PACKING
+
+Result JSON:
+C:\Users\User\Downloads\NEWEPS-LIVE-SUBMIT-JOBS\dc9e16aec9a3412f8a72cc4afb16284d\live_submit_result_real_after_questionnaire_fix.json
+
+Evidence screenshots folder:
+C:\Users\User\Downloads\NEWEPS-LIVE-SUBMIT-JOBS\dc9e16aec9a3412f8a72cc4afb16284d\doc2us_live_screenshots_real_after_questionnaire_fix
+
+Fixes included:
+- Register New Patient flow from Medication Record search page.
+- Leading-zero IC preserved as text.
+- Doc2Us registration fields: birthday, confirmPassword, NKDA, terms checkbox visual click.
+- Screening questionnaire required fields: medicationList, medicationHistory, registerNumber fallback, followUpUnder.
+- Final submit verification by Total Medication Record count increase.

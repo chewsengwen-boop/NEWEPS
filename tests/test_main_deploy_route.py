@@ -72,15 +72,14 @@ def test_website_deploy_button_runs_live_submitter_without_500(tmp_path, monkeyp
             }],
         }
 
-    monkeypatch.setenv('EPS_STAFF_ACCOUNTS_JSON', '[{"staff_label":"Staff A","app_email":"staffa@example.com","app_password":"app-pass","doc2us_email":"doc-a@example.com","doc2us_password":"doc-pass"}]')
     monkeypatch.setattr(main, 'JOBS_DIR', tmp_path)
     monkeypatch.setattr('app.web_logic.submit_doc2us_queue_live', fake_submit)
 
     client = TestClient(main.app)
-    client.cookies.set('eps_email', 'staffa@example.com')
+    client.cookies.set('eps_email', 'qsbjc1@alpropharmacy.com')
     response = client.post(f'/deploy/{job_id}', data={}, follow_redirects=True)
 
     assert response.status_code == 200
     assert 'Doc2Us Batch Deployment Running' in response.text or 'Doc2Us Live Deployment Status' in response.text
-    assert 'Staff A' in response.text
+    assert 'one Doc2Us login/session' in response.text or 'Doc2Us login count: 1' in response.text
     assert (tmp_path / job_id / 'doc2us_deployment_progress.json').exists()

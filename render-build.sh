@@ -1,10 +1,5 @@
-.git
-__pycache__
-*.pyc
-.pytest_cache
-.venv
-venv
-node_modules
-.env
-jobs
-*.zip
+#!/usr/bin/env bash
+set -euo pipefail
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+python -m playwright install chromium
