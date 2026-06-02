@@ -7,7 +7,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -96,13 +96,30 @@ class Doc2UsLiveRunner:
         self.headless = bool(headless)
         self.final_submit = bool(final_submit)
 
-    def run_queue(self, queue: pd.DataFrame) -> LiveSubmitResult:
+    def run_queue(self, queue: pd.DataFrame, progress_callback: Callable[[dict[str, Any]], None] | None = None) -> LiveSubmitResult:
         from playwright.sync_api import sync_playwright
 
         email, password = _env_login()
+        queue = queue.reset_index(drop=True)
+        total = int(len(queue))
+        patient_groups = int(queue['patient_ic'].fillna('').astype(str).str.strip().nunique()) if 'patient_ic' in queue.columns else 0
         results: list[dict[str, Any]] = []
         submitted = 0
         failed = 0
+
+        def progress(event: str, **payload: Any) -> None:
+            if progress_callback:
+                progress_callback({
+                    'event': event,
+                    'total_rows': total,
+                    'patient_groups': patient_groups,
+                    'submitted_count': submitted,
+                    'failed_count': failed,
+                    'results': list(results),
+                    **payload,
+                })
+
+        progress('starting_browser')
         with sync_playwright() as p:
             launch_args: dict[str, Any] = {
                 'headless': self.headless,
@@ -124,11 +141,19 @@ class Doc2UsLiveRunner:
             page = browser.new_page(viewport={'width': 1440, 'height': 1000})
             try:
                 self._login(page, email, password)
-                for pos, row in queue.reset_index(drop=True).iterrows():
+                progress('logged_in')
+                last_ic = ''
+                for pos, row in queue.iterrows():
+                    ic_now = _clean(row.get('patient_ic'))
+                    if ic_now != last_ic:
+                        progress('patient_group_started', current_row=int(pos), patient_ic=ic_now, patient_name=_clean(row.get('patient_name')))
+                        last_ic = ic_now
+                    progress('row_started', current_row=int(pos), patient_ic=ic_now, medication=_clean(row.get('item_name')))
                     try:
                         record = self._submit_one(page, row, int(pos))
                         submitted += 1
                         results.append(record)
+                        progress('row_finished', current_row=int(pos), last_result=record)
                     except Exception as exc:  # noqa: BLE001 - return per-row evidence to pharmacist
                         failed += 1
                         shot = self.screenshot_dir / f'row_{pos+1}_failed.png'
@@ -136,16 +161,20 @@ class Doc2UsLiveRunner:
                             page.screenshot(path=str(shot), full_page=True)
                         except Exception:
                             pass
-                        results.append({
+                        failed_record = {
                             'row': int(pos),
                             'patient_ic': _clean(row.get('patient_ic')),
+                            'patient_name': _clean(row.get('patient_name')),
                             'medication': _clean(row.get('item_name')),
                             'status': 'FAILED',
                             'error': str(exc),
                             'screenshot': str(shot),
-                        })
+                        }
+                        results.append(failed_record)
+                        progress('row_failed', current_row=int(pos), last_result=failed_record)
             finally:
                 browser.close()
+        progress('finished')
         return LiveSubmitResult(submitted, failed, results, str(self.screenshot_dir))
 
     def _login(self, page, email: str, password: str) -> None:
@@ -456,10 +485,10 @@ class Doc2UsLiveRunner:
         raise RuntimeError('Medication record filled, but no final request/submit button was found. Page text: ' + body_text[:800])
 
 
-def submit_doc2us_queue_live(queue_path: str | Path, screenshot_dir: str | Path, final_submit: bool = True) -> dict[str, Any]:
+def submit_doc2us_queue_live(queue_path: str | Path, screenshot_dir: str | Path, final_submit: bool = True, progress_callback: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
     queue = pd.read_excel(queue_path, sheet_name='DOC2US_READY_UPLOAD', dtype=object)
     runner = Doc2UsLiveRunner(screenshot_dir=screenshot_dir, headless=True, final_submit=final_submit)
-    result = runner.run_queue(queue)
+    result = runner.run_queue(queue, progress_callback=progress_callback)
     return {
         'submitted_count': result.submitted_count,
         'failed_count': result.failed_count,

@@ -5,6 +5,7 @@ import shutil
 import uuid
 import csv
 import json
+from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
 from typing import Dict, Any
@@ -52,6 +53,30 @@ REQUIRED_DOC2US_FIELDS = {
     'screening_remarks': 'Screening remarks are required',
 }
 
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec='seconds')
+
+
+def _deployment_progress_path(jobs_dir: str | Path, job_id: str) -> Path:
+    return _safe_job_dir(jobs_dir, job_id) / 'doc2us_deployment_progress.json'
+
+
+def write_deployment_progress(jobs_dir: str | Path, job_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    progress = dict(data)
+    progress['job_id'] = job_id
+    progress['updated_at'] = _utc_now()
+    path = _deployment_progress_path(jobs_dir, job_id)
+    path.write_text(json.dumps(progress, indent=2, ensure_ascii=False), encoding='utf-8')
+    return progress
+
+
+def read_deployment_progress(jobs_dir: str | Path, job_id: str) -> dict[str, Any]:
+    path = _deployment_progress_path(jobs_dir, job_id)
+    if path.exists():
+        return json.loads(path.read_text(encoding='utf-8'))
+    return {'job_id': job_id, 'status': 'not_started', 'event': 'not_started', 'results': [], 'updated_at': ''}
 
 def doc2us_deploy_columns() -> list[str]:
     return list(DOC2US_DEPLOY_COLUMNS)
@@ -339,10 +364,14 @@ def deploy_doc2us_ready_rows(jobs_dir: str | Path, job_id: str, live_submit: boo
     manifest['invalid_count'] = int(package.get('invalid_count', 0))
     if live_submit and int(package['count']) > 0:
         try:
+            def _progress(event: dict[str, Any]) -> None:
+                write_deployment_progress(jobs_dir, job_id, {'status': 'running', **event})
+
             live = submit_doc2us_queue_live(
                 package['queue_path'],
                 screenshot_dir=job_dir / 'doc2us_live_screenshots',
                 final_submit=True,
+                progress_callback=_progress,
             )
         except Exception as exc:
             live = {
@@ -360,14 +389,18 @@ def deploy_doc2us_ready_rows(jobs_dir: str | Path, job_id: str, live_submit: boo
                 'screenshot_dir': str(job_dir / 'doc2us_live_screenshots'),
             }
         manifest.update(live)
+        manifest['batch_mode'] = True
+        manifest['login_count'] = 1
+        manifest['patient_group_count'] = int(_normalise_deploy_frame(_load_doc2us_queue(package['queue_path']))['patient_ic'].fillna('').astype(str).str.strip().nunique())
         manifest['dry_run'] = False
         verified = sum(1 for r in live.get('results', []) if str(r.get('status')) == 'VERIFIED')
         manifest['verified_count'] = int(verified)
         manifest['notification'] = (
-            f"Live Doc2Us submission verified: {verified} medication record(s) created in EPS portal, "
-            f"{int(live.get('failed_count', 0))} failed. "
+            f"Batch live Doc2Us submission finished with one Doc2Us login: {verified} medication record(s) verified, "
+            f"{int(live.get('failed_count', 0))} failed, across {manifest['patient_group_count']} patient group(s). "
             f"{int(package.get('invalid_count', 0))} invalid READY row(s) moved back to REVIEW."
         )
+        write_deployment_progress(jobs_dir, job_id, {'status': 'finished', 'event': 'finished', **manifest})
     else:
         manifest['notification'] = (
             f"Doc2Us deployment prepared: {int(package['count'])} medication(s) / "

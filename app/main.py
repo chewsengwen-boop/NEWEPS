@@ -5,11 +5,11 @@ import json
 from pathlib import Path
 from html import escape
 
-from fastapi import FastAPI, Request, Form, File, UploadFile, HTTPException
+from fastapi import FastAPI, Request, Form, File, UploadFile, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
-from .web_logic import authenticate, process_upload, load_plan, save_edited_plan, create_submit_package, EDITABLE_COLUMNS, render_indication_select, load_doc2us_indication_options, import_edited_doc2us_queue, build_doc2us_automation_manifest, deploy_doc2us_ready_rows
+from .web_logic import authenticate, process_upload, load_plan, save_edited_plan, create_submit_package, EDITABLE_COLUMNS, render_indication_select, load_doc2us_indication_options, import_edited_doc2us_queue, build_doc2us_automation_manifest, deploy_doc2us_ready_rows, read_deployment_progress, write_deployment_progress
 
 BASE = Path(__file__).resolve().parents[1]
 JOBS_DIR = BASE / 'jobs'
@@ -79,7 +79,7 @@ def render_review(job_id: str, request: Request, notice: str = '') -> HTMLRespon
 <form method="post" action="/save/{escape(job_id)}">
 <p class="note"><b>Editable now:</b> status, patient info, active-ingredient-mapped medication, AI pre-reviewed Doc2Us indication dropdown, dose, frequency, days, amount, BP/HR/glucose, remarks. Change REVIEW to READY only after pharmacist confirms the medication details are correct.</p>
 <div class="grid"><table><thead><tr><th># / Status</th><th>Reason</th><th>Patient</th><th>Medication</th><th>Indication</th><th>Dose/Frequency</th><th>Duration/Amount</th><th>Screening</th><th>Remarks</th></tr></thead><tbody>{''.join(rows)}</tbody></table></div>
-<p class="rowactions"><button type="submit">Save Edits</button><button type="submit" formaction="/deploy/{escape(job_id)}" class="warnbtn">Save Edits + Deploy To Doc2Us</button></p>
+<p class="rowactions"><button type="submit">Save Edits</button><button type="submit" formaction="/deploy/{escape(job_id)}" class="warnbtn">Save Edits + Start Batch Deploy To Doc2Us</button></p>
 </form>
 <script>
 document.querySelectorAll('select[name$="_doc2us_icd_code"]').forEach(function(sel){{
@@ -187,13 +187,7 @@ async def save(job_id: str, request: Request):
     return render_review(job_id, request, 'Saved edits. You can now deploy READY rows to Doc2Us or keep editing/omitting rows.')
 
 
-@app.post('/deploy/{job_id}', response_class=HTMLResponse)
-async def deploy(job_id: str, request: Request):
-    if not require_login(request):
-        return RedirectResponse('/', status_code=303)
-    form = await request.form()
-    save_edited_plan(JOBS_DIR, job_id, extract_row_edits(form))
-    result = await run_in_threadpool(deploy_doc2us_ready_rows, JOBS_DIR, job_id, True)
+def render_deployment_result(job_id: str, result: dict) -> HTMLResponse:
     invalid = int(result.get('invalid_count', 0))
     failed = int(result.get('failed_count', 0))
     verified = int(result.get('verified_count', 0))
@@ -214,14 +208,66 @@ async def deploy(job_id: str, request: Request):
 <div class="summary">
 <span class="pill READY">Verified EPS records created: {verified}</span>
 <span class="pill OMIT">Failed: {failed}</span>
+<span class="pill REVIEW">Patient groups: {escape(str(result.get('patient_group_count', '')))}</span>
+<span class="pill READY">Doc2Us login count: {escape(str(result.get('login_count', '1')))}</span>
 </div>
-<p>One medication equals one prescription request row.</p>
+<p>Batch mode uses one Doc2Us login/session for all READY rows. One medication equals one prescription request row.</p>
 <div class="safety"><b>Status:</b> {escape(str(result.get('notification', 'Live deployment completed.')))}</div>
 {result_table}
 <p class="small">Evidence folder: {escape(str(result.get('screenshot_dir', '')))}</p>
 <p class="rowactions"><a class="button secondary" href="/review/{escape(job_id)}">Back to Review</a><a class="button" href="/upload">Upload Next Raw Excel</a></p>
 </main>'''
     return html_page('Doc2Us Deployment Notification', body)
+
+
+@app.post('/deploy/{job_id}', response_class=HTMLResponse)
+async def deploy(job_id: str, request: Request, background_tasks: BackgroundTasks):
+    if not require_login(request):
+        return RedirectResponse('/', status_code=303)
+    form = await request.form()
+    save_edited_plan(JOBS_DIR, job_id, extract_row_edits(form))
+    package = create_submit_package(JOBS_DIR, job_id)
+    write_deployment_progress(JOBS_DIR, job_id, {
+        'status': 'queued',
+        'event': 'queued',
+        'total_rows': int(package.get('count', 0)),
+        'submitted_count': 0,
+        'failed_count': 0,
+        'results': [],
+        'notification': 'Batch deployment queued. The system will login to Doc2Us once and process all READY rows.',
+    })
+    background_tasks.add_task(deploy_doc2us_ready_rows, JOBS_DIR, job_id, True)
+    return RedirectResponse(f'/deploy-status/{escape(job_id)}', status_code=303)
+
+
+@app.get('/deploy-status/{job_id}', response_class=HTMLResponse)
+def deploy_status(job_id: str, request: Request):
+    if not require_login(request):
+        return RedirectResponse('/', status_code=303)
+    progress = read_deployment_progress(JOBS_DIR, job_id)
+    if progress.get('status') == 'finished':
+        return render_deployment_result(job_id, progress)
+    rows = ''.join(
+        f'<tr><td>{escape(str(r.get("row", "")))}</td><td>{escape(str(r.get("patient_ic", "")))}</td><td>{escape(str(r.get("medication", "")))}</td><td>{escape(str(r.get("status", "")))}</td><td>{escape(str(r.get("before_count", "")))}</td><td>{escape(str(r.get("after_count", "")))}</td><td>{escape(str(r.get("error", "")))}</td></tr>'
+        for r in progress.get('results', [])
+    )
+    table = f'<div class="grid"><table><thead><tr><th>Row</th><th>IC</th><th>Medication</th><th>Status</th><th>Before</th><th>After</th><th>Error</th></tr></thead><tbody>{rows}</tbody></table></div>' if rows else ''
+    body = f'''<main class="card wide">
+<meta http-equiv="refresh" content="5">
+<h1>Doc2Us Batch Deployment Running</h1>
+<div class="summary">
+<span class="pill READY">Status: {escape(str(progress.get('status', 'queued')))}</span>
+<span class="pill REVIEW">Event: {escape(str(progress.get('event', '')))}</span>
+<span class="pill READY">Rows: {escape(str(progress.get('submitted_count', 0)))} / {escape(str(progress.get('total_rows', 0)))}</span>
+<span class="pill OMIT">Failed: {escape(str(progress.get('failed_count', 0)))}</span>
+</div>
+<p class="note">This page auto-refreshes every 5 seconds. The browser automation keeps one Doc2Us login/session and processes all READY rows in batch. REVIEW and OMIT rows are excluded.</p>
+<div class="safety"><b>Current:</b> {escape(str(progress.get('notification') or progress.get('patient_ic') or progress.get('medication') or 'Starting...'))}</div>
+<p class="small">Updated: {escape(str(progress.get('updated_at', '')))}</p>
+{table}
+<p class="rowactions"><a class="button secondary" href="/review/{escape(job_id)}">Back to Review</a></p>
+</main>'''
+    return html_page('Doc2Us Batch Deployment Running', body)
 
 
 @app.post('/submit/{job_id}', response_class=HTMLResponse)
@@ -268,7 +314,7 @@ async def import_queue(job_id: str, request: Request, queue_file: UploadFile = F
 <p>Invalid rows moved to REVIEW: {result['invalid_count']}</p>
 <div class="safety"><b>End phase ready:</b> The selected Excel has been validated. Press the button below to run the live Doc2Us browser automation. It will only report VERIFIED when the EPS Total Medication Record count increases after submit.</div>
 <form method="post" action="/deploy/{escape(job_id)}">
-  <button type="submit">Deploy Now To Doc2Us EPS And Verify Record Count</button>
+  <button type="submit">Start Batch Deploy To Doc2Us EPS And Verify Record Count</button>
 </form>
 <p class="rowactions"><a class="button secondary" href="/review/{escape(job_id)}">Back to Review</a></p>
 </main>'''

@@ -237,9 +237,11 @@ def test_live_deploy_invokes_doc2us_submitter_and_records_real_counts(tmp_path, 
     job = _sample_job(tmp_path)
     calls = []
 
-    def fake_submit(queue_path, screenshot_dir, final_submit=True):
+    def fake_submit(queue_path, screenshot_dir, final_submit=True, progress_callback=None):
         q = pd.read_excel(queue_path, sheet_name='DOC2US_READY_UPLOAD')
-        calls.append((Path(queue_path), Path(screenshot_dir), final_submit, len(q)))
+        calls.append((Path(queue_path), Path(screenshot_dir), final_submit, len(q), progress_callback is not None))
+        if progress_callback:
+            progress_callback({'event': 'logged_in', 'submitted_count': 0, 'failed_count': 0, 'results': [], 'total_rows': len(q), 'patient_groups': q['patient_ic'].astype(str).nunique()})
         return {
             'submitted_count': len(q),
             'failed_count': 0,
@@ -251,10 +253,14 @@ def test_live_deploy_invokes_doc2us_submitter_and_records_real_counts(tmp_path, 
     result = deploy_doc2us_ready_rows(tmp_path, job['job_id'], live_submit=True)
     assert calls
     assert calls[0][2] is True
+    assert calls[0][4] is True
     assert result['dry_run'] is False
     assert result['live_submit_enabled'] is True
     assert result['submitted_count'] == job['counts']['READY']
     assert result['failed_count'] == 0
     assert result['medication_count'] == job['counts']['READY']
-    assert 'Live Doc2Us submission verified' in result['notification']
+    assert 'one Doc2Us login' in result['notification']
     assert result['verified_count'] == job['counts']['READY']
+    assert result['batch_mode'] is True
+    assert result['login_count'] == 1
+    assert result['patient_group_count'] >= 1

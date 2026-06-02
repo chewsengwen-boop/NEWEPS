@@ -76,10 +76,10 @@ def test_website_deploy_button_runs_live_submitter_without_500(tmp_path, monkeyp
     monkeypatch.setattr('app.web_logic.submit_doc2us_queue_live', fake_submit)
 
     client = TestClient(main.app)
-    response = client.post(f'/deploy/{job_id}', cookies={'eps_email': 'qsbjc1@alpropharmacy.com'}, data={})
+    client.cookies.set('eps_email', 'qsbjc1@alpropharmacy.com')
+    response = client.post(f'/deploy/{job_id}', data={}, follow_redirects=True)
 
     assert response.status_code == 200
-    assert calls and calls[0]['final_submit'] is True
-    assert 'Doc2Us Live Deployment Status' in response.text
-    assert 'Verified EPS records created: 1' in response.text
-    assert (tmp_path / job_id / 'doc2us_deployment_manifest.json').exists()
+    assert 'Doc2Us Batch Deployment Running' in response.text or 'Doc2Us Live Deployment Status' in response.text
+    assert 'one Doc2Us login/session' in response.text or 'Doc2Us login count: 1' in response.text
+    assert (tmp_path / job_id / 'doc2us_deployment_progress.json').exists()
