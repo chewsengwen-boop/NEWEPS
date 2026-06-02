@@ -1,39 +1,86 @@
-EPS Shared Web Automation
+from pathlib import Path
 
-What this is
-- A browser-based shared web app for colleagues.
-- Colleagues login using the same Doc2Us/EPS login style.
-- Pilot login enabled first:
-  qsbjc1@alpropharmacy.com / Alpro-123
-- Upload Octopus Poison B/C Excel.
-- Enter pharmacist name and registration number.
-- App generates READY / REVIEW / OMIT EPS plan and downloadable Excel.
+import pandas as pd
+from fastapi.testclient import TestClient
 
-Important
-- This tool does not prescribe. It structures and submits data to reduce repeated entry.
-- Pharmacist review is still required before any EPS submission.
-- Current version completes shared upload/review/export. Live EPS submit should be enabled after pilot verification and EPS selector mapping.
+from app import main
+from app.web_logic import doc2us_deploy_columns
 
-Run locally for testing
-cd /home/johnny/eps-web-automation
-python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8088
-Open: http://localhost:8088
 
-Deploy options
-- Render/Railway/Fly.io/DigitalOcean VPS.
-- Install requirements.txt.
-- Start command:
-  uvicorn app.main:app --host 0.0.0.0 --port $PORT
+def _make_ready_job(tmp_path):
+    job_id = 'routejob123'
+    job_dir = tmp_path / job_id
+    job_dir.mkdir()
+    row = {col: '' for col in doc2us_deploy_columns()}
+    row.update({
+        'status': 'READY',
+        'patient_name': 'Test Patient',
+        'patient_ic': '900101131234',
+        'mobile': '0123456789',
+        'email': '900101131234@doc2us.com',
+        'item_name': 'Amlodipine 10mg',
+        'active_ingredients': 'Amlodipine',
+        'indication': 'Hypertension',
+        'doc2us_icd_code': 'BA00.Z',
+        'doc2us_indication': 'Essential hypertension, unspecified',
+        'diagnosis_search': 'BA00.Z',
+        'route': 'Oral',
+        'dose': '1',
+        'dose_unit': 'tab(s)/cap(s)',
+        'frequency': 'Once daily',
+        'duration_days': 30,
+        'prescribed_amount': 30,
+        'prescribed_unit': 'tablet(s)',
+        'drug_remark': 'refill medication',
+        'questionnaire_mode': 'LTM',
+        'bp': '120/80',
+        'hr': '75',
+        'glucose': '6.0',
+        'last_appointment_date': '2026-05-01',
+        'next_appointment_date': '2026-06-30',
+        'follow_up_under': 'Alpro',
+        'referred_by': 'Johnny Chew Seng Wen',
+        'pharmacist_reg_no': '018161',
+        'screening_remarks': 'refill medication',
+        'skip_reason': '',
+        'medication_class': 'B',
+    })
+    plan_path = job_dir / 'route_EPS_PLAN.xlsx'
+    pd.DataFrame([row]).to_excel(plan_path, index=False, sheet_name='EPS_PLAN')
+    return job_id
 
-Security upgrades before public internet use
-1. Put behind HTTPS.
-2. Replace pilot hardcoded login with real encrypted user/session management or Doc2Us verification flow.
-3. Store uploads with retention policy or auto-delete.
-4. Add audit log per pharmacist and uploaded file.
-5. Keep OpenAI/ChatGPT medicine classification limited to item name/quantity only, not patient IC/name.
 
-AI/ChatGPT integration design
-- Existing rule table runs first.
-- Unknown medicine becomes REVIEW.
-- Optional next step: call OpenAI only for unknown medicines to suggest class/indication/dose/frequency from handbook context.
-- Pharmacist approves suggestion, then saves it into medication_rules.csv/database for future use.
+def test_website_deploy_button_runs_live_submitter_without_500(tmp_path, monkeypatch):
+    job_id = _make_ready_job(tmp_path)
+    calls = []
+
+    def fake_submit(queue_path, screenshot_dir, final_submit=True):
+        q = pd.read_excel(queue_path, sheet_name='DOC2US_READY_UPLOAD')
+        calls.append({'queue_path': str(queue_path), 'screenshot_dir': str(screenshot_dir), 'final_submit': final_submit, 'rows': len(q)})
+        Path(screenshot_dir).mkdir(parents=True, exist_ok=True)
+        return {
+            'submitted_count': len(q),
+            'failed_count': 0,
+            'screenshot_dir': str(screenshot_dir),
+            'results': [{
+                'row': 0,
+                'patient_ic': '900101131234',
+                'medication': 'Amlodipine 10mg',
+                'status': 'VERIFIED',
+                'before_count': 10,
+                'after_count': 11,
+            }],
+        }
+
+    monkeypatch.setenv('EPS_STAFF_ACCOUNTS_JSON', '[{"staff_label":"Staff A","app_email":"staffa@example.com","app_password":"app-pass","doc2us_email":"doc-a@example.com","doc2us_password":"doc-pass"}]')
+    monkeypatch.setattr(main, 'JOBS_DIR', tmp_path)
+    monkeypatch.setattr('app.web_logic.submit_doc2us_queue_live', fake_submit)
+
+    client = TestClient(main.app)
+    client.cookies.set('eps_email', 'staffa@example.com')
+    response = client.post(f'/deploy/{job_id}', data={}, follow_redirects=True)
+
+    assert response.status_code == 200
+    assert 'Doc2Us Batch Deployment Running' in response.text or 'Doc2Us Live Deployment Status' in response.text
+    assert 'Staff A' in response.text
+    assert (tmp_path / job_id / 'doc2us_deployment_progress.json').exists()

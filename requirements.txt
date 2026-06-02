@@ -1,9 +1,6 @@
-fastapi
-uvicorn[standard]
-python-multipart
-jinja2
-pandas
-openpyxl
-playwright
-httpx
-pytest
+__pycache__/
+*.pyc
+.pytest_cache/
+jobs/
+.env
+.venv/
