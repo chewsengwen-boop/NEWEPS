@@ -104,7 +104,18 @@ class Doc2UsLiveRunner:
         submitted = 0
         failed = 0
         with sync_playwright() as p:
-            launch_args: dict[str, Any] = {'headless': self.headless}
+            launch_args: dict[str, Any] = {
+                'headless': self.headless,
+                'timeout': 60000,
+                'args': [
+                    '--no-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--disable-software-rasterizer',
+                    '--single-process',
+                    '--no-zygote',
+                ],
+            }
             for candidate in ['/usr/bin/chromium', '/usr/bin/chromium-browser', '/snap/bin/chromium']:
                 if Path(candidate).exists():
                     launch_args['executable_path'] = candidate
@@ -268,10 +279,13 @@ class Doc2UsLiveRunner:
         if 'BA00.Z' not in expanded:
             expanded.append('BA00.Z')
         select.click(force=True, timeout=15000)
+        # The first mat-option is a disabled ngx-mat-select-search input. On the
+        # live portal the real ICD options can arrive a moment later; reading too
+        # early sees only the blank search row and falsely fails.
+        page.wait_for_function("document.querySelectorAll('mat-option:not(.mat-option-disabled)').length > 0", timeout=20000)
         page.wait_for_timeout(300)
-        options = page.locator('mat-option')
-        options.first.wait_for(state='visible', timeout=15000)
-        option_texts = options.all_inner_texts()
+        options = page.locator('mat-option:not(.mat-option-disabled)')
+        option_texts = [t.strip() for t in options.all_inner_texts()]
         for candidate in expanded:
             needle = candidate.split(' - ')[0].strip()
             match = options.filter(has_text=needle).first
@@ -374,10 +388,26 @@ class Doc2UsLiveRunner:
 
     def _continue_and_submit_questionnaire(self, page, row: pd.Series) -> None:
         # Site labels have changed before, so use progressive button clicks and fill common questionnaire fields when present.
-        for text in ['CONTINUE', 'Continue', 'NEXT', 'Next']:
-            if self._click_text_if_visible(page, text, timeout=2500):
+        # On slower Render instances, a broad `Continue` text click can leave the
+        # page on the medication screen with an `Information Please` modal. Click
+        # the concrete questionnaire button first, acknowledge any info modal, and
+        # wait for the questionnaire route/fields before deciding it failed.
+        continued = False
+        for text in ['Continue To Screening Questionnaire', 'CONTINUE', 'Continue', 'NEXT', 'Next']:
+            if self._click_text_if_visible(page, text, timeout=4000):
+                continued = True
+                page.wait_for_timeout(1000)
+                popup = page.locator('ngb-modal-window').last
+                if popup.count() and popup.get_by_role('button', name='OK').count():
+                    popup.get_by_role('button', name='OK').click(force=True)
+                    page.wait_for_timeout(700)
                 break
-        page.wait_for_timeout(1500)
+        if continued:
+            try:
+                page.wait_for_url('**/screening-questionnaire**', timeout=12000)
+            except Exception:
+                # Some deployments update the DOM before URL matching settles.
+                page.wait_for_timeout(1500)
 
         body_text = page.locator('body').inner_text(timeout=5000)
         # Fill screening questionnaire required fields. Doc2Us keeps previous

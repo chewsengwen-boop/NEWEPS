@@ -1,10 +1,9 @@
 services:
   - type: web
     name: neweps
-    env: python
+    runtime: docker
     plan: starter
-    buildCommand: pip install -r requirements.txt && python -m playwright install chromium
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    dockerfilePath: ./Dockerfile
     envVars:
       - key: EPS_ALLOWED_EMAIL
         sync: false
