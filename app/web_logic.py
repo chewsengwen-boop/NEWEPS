@@ -29,6 +29,82 @@ DOC2US_DEPLOY_COLUMNS = [
     'questionnaire_mode', 'bp', 'hr', 'glucose', 'last_appointment_date', 'next_appointment_date',
     'follow_up_under', 'referred_by', 'pharmacist_reg_no', 'screening_remarks'
 ]
+
+MAX_STAFF_ACCOUNTS = 7
+
+DEFAULT_REVIEW_VALUES = {
+    'route': 'Oral',
+    'dose': '1',
+    'dose_unit': 'tab(s)/cap(s)',
+    'frequency': 'Once daily',
+    'duration_days': 7,
+    'prescribed_unit': 'tab(s)/cap(s)',
+    'questionnaire_mode': 'LTM',
+    'bp': '120/80',
+    'hr': '75',
+    'glucose': '6.0',
+    'screening_remarks': 'refill medication',
+    'drug_remark': 'refill medication',
+}
+
+INDICATION_KEYWORDS = [
+    (('diabetes', 'diabetic', 'metformin', 'gliclazide', 'insulin', 'sitagliptin', 'empagliflozin', 'dapagliflozin'), '5A11'),
+    (('cholesterol', 'hyperchol', 'atorvastatin', 'rosuvastatin', 'simvastatin', 'ezetimibe', 'fenofibrate'), '5C80.0Z'),
+    (('gout', 'allopurinol', 'febuxostat', 'colchicine'), 'FA25'),
+    (('pain', 'paracetamol', 'celecoxib', 'etoricoxib', 'diclofenac', 'tramadol', 'pregabalin', 'gabapentin'), 'MG3Z'),
+    (('thyroid', 'levothyroxine', 'carbimazole'), '5A0Z'),
+    (('glaucoma', 'latanoprost', 'timolol'), '9C61.Z'),
+    (('hepatitis b', 'tenofovir', 'entecavir'), '1E51.0Z'),
+    (('heart', 'angina', 'bisoprolol', 'carvedilol', 'isosorbide'), 'BA6Z'),
+    (('hypertension', 'amlodipine', 'perindopril', 'losartan', 'valsartan', 'telmisartan', 'irbesartan', 'hydrochlorothiazide'), 'BA00.Z'),
+]
+
+
+def _doc2us_desc_by_code() -> dict[str, str]:
+    return {code: desc for code, desc in load_doc2us_indication_options()}
+
+
+def _choose_default_indication(row: pd.Series) -> tuple[str, str]:
+    existing_code = str(row.get('doc2us_icd_code', '') or '').strip()
+    existing_text = str(row.get('doc2us_indication', '') or '').strip()
+    desc_by_code = _doc2us_desc_by_code()
+    if existing_code and existing_code in desc_by_code:
+        return existing_code, existing_text or desc_by_code[existing_code]
+    haystack = ' '.join(str(row.get(c, '') or '') for c in ['indication', 'diagnosis_search', 'item_name', 'active_ingredients']).lower()
+    for keywords, code in INDICATION_KEYWORDS:
+        if any(k in haystack for k in keywords):
+            return code, desc_by_code.get(code, '')
+    fallback_code = os.environ.get('EPS_DEFAULT_DOC2US_ICD_CODE', 'BA00.Z').strip() or 'BA00.Z'
+    return fallback_code, desc_by_code.get(fallback_code, 'Essential hypertension, unspecified')
+
+
+def apply_review_defaults(plan: pd.DataFrame) -> pd.DataFrame:
+    """Prefill blank review/deploy fields so pharmacists edit from sensible defaults instead of blanks."""
+    plan = plan.copy()
+    for col in EDITABLE_COLUMNS:
+        if col not in plan.columns:
+            plan[col] = ''
+    for idx, row in plan.iterrows():
+        code, desc = _choose_default_indication(row)
+        if _blank(plan.at[idx, 'doc2us_icd_code']):
+            plan.at[idx, 'doc2us_icd_code'] = code
+        if _blank(plan.at[idx, 'doc2us_indication']):
+            plan.at[idx, 'doc2us_indication'] = desc
+        if _blank(plan.at[idx, 'diagnosis_search']):
+            plan.at[idx, 'diagnosis_search'] = desc or str(plan.at[idx, 'indication'] or '')
+        for col, val in DEFAULT_REVIEW_VALUES.items():
+            if col == 'duration_days':
+                if not _positive_number(plan.at[idx, col]):
+                    plan.at[idx, col] = val
+            elif _blank(plan.at[idx, col]):
+                plan.at[idx, col] = val
+        if not _positive_number(plan.at[idx, 'prescribed_amount']):
+            qty = row.get('qty', '')
+            plan.at[idx, 'prescribed_amount'] = int(float(qty)) if _positive_number(qty) else 7
+        if _blank(plan.at[idx, 'active_ingredients']):
+            plan.at[idx, 'active_ingredients'] = str(row.get('item_name', '') or '')
+    return plan
+
 REQUIRED_DOC2US_FIELDS = {
     'patient_name': 'Patient name is required',
     'patient_ic': 'Patient IC is required',
@@ -141,20 +217,69 @@ def render_indication_select(row_idx: int, selected_code: str, selected_text: st
     return f'<select name="row_{row_idx}_doc2us_icd_code">{html_options}</select>{hidden}'
 
 
-def _allowed_logins() -> dict[str, str]:
-    """Pilot shared-app login list.
+def get_staff_accounts() -> list[dict[str, str]]:
+    """Return staff app-login + assigned Doc2Us-login accounts.
 
-    Default enables the first approved Doc2Us/EPS account. On deployment, set
-    EPS_ALLOWED_EMAIL and EPS_ALLOWED_PASSWORD environment variables so the
-    password is not hardcoded in platform configuration/history.
+    Preferred Render env var: EPS_STAFF_ACCOUNTS_JSON
+    [
+      {"staff_label": "Staff A", "app_email": "staffa@example.com", "app_password": "...",
+       "doc2us_email": "doc2us-a@example.com", "doc2us_password": "..."}
+    ]
+
+    Backward compatible fallback uses EPS_ALLOWED_EMAIL/PASSWORD and DOC2US_EMAIL/PASSWORD.
     """
-    email = os.environ.get('EPS_ALLOWED_EMAIL', 'qsbjc1@alpropharmacy.com').strip().lower()
-    password = os.environ.get('EPS_ALLOWED_PASSWORD', 'Alpro-123')
-    return {email: password}
+    raw = os.environ.get('EPS_STAFF_ACCOUNTS_JSON', '').strip()
+    accounts: list[dict[str, str]] = []
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                parsed = parsed[:MAX_STAFF_ACCOUNTS]
+                for i, item in enumerate(parsed):
+                    if not isinstance(item, dict):
+                        continue
+                    app_email = str(item.get('app_email') or item.get('email') or '').strip().lower()
+                    app_password = str(item.get('app_password') or item.get('password') or '')
+                    doc_email = str(item.get('doc2us_email') or '').strip()
+                    doc_password = str(item.get('doc2us_password') or '')
+                    if app_email and app_password and doc_email and doc_password:
+                        accounts.append({
+                            'id': str(item.get('id') or app_email).strip().lower(),
+                            'staff_label': str(item.get('staff_label') or item.get('label') or app_email).strip(),
+                            'app_email': app_email,
+                            'app_password': app_password,
+                            'doc2us_email': doc_email,
+                            'doc2us_password': doc_password,
+                        })
+        except json.JSONDecodeError:
+            pass
+    if accounts:
+        return accounts[:MAX_STAFF_ACCOUNTS]
+    app_email = os.environ.get('EPS_ALLOWED_EMAIL', 'qsbjc1@alpropharmacy.com').strip().lower()
+    app_password = os.environ.get('EPS_ALLOWED_PASSWORD', 'Alpro-123')
+    return [{
+        'id': app_email,
+        'staff_label': os.environ.get('EPS_STAFF_LABEL', app_email),
+        'app_email': app_email,
+        'app_password': app_password,
+        'doc2us_email': os.environ.get('DOC2US_EMAIL') or app_email,
+        'doc2us_password': os.environ.get('DOC2US_PASSWORD') or app_password,
+    }]
+
+
+def _allowed_logins() -> dict[str, str]:
+    return {a['app_email'].lower(): a['app_password'] for a in get_staff_accounts()}
+
+
+def get_staff_account_by_app_email(app_email: str) -> dict[str, str] | None:
+    wanted = (app_email or '').strip().lower()
+    for account in get_staff_accounts():
+        if account['app_email'].lower() == wanted:
+            return account
+    return None
 
 
 def authenticate(email: str, password: str) -> bool:
-    """Temporary shared-app login: accept only the approved EPS pilot account."""
     return _allowed_logins().get((email or '').strip().lower()) == (password or '')
 
 
@@ -233,6 +358,7 @@ def process_upload(
         shutil.copy2(web_rules, core_rules)
 
     plan = eps_bulk_core.make_plan(str(input_path), pharmacist_name, reg_no, pd.to_datetime(apply_date).date())
+    plan = apply_review_defaults(plan)
     output_path = job_dir / f'{input_path.stem}_EPS_PLAN.xlsx'
     _write_plan_workbook(plan, output_path)
     summary = _job_summary(job_id, output_path, plan)
@@ -272,6 +398,7 @@ def save_edited_plan(jobs_dir: str | Path, job_id: str, edits: dict[str, dict[st
             else:
                 val = str(val or '').strip()
             plan.at[idx, col] = val
+    plan = apply_review_defaults(plan)
     _write_plan_workbook(plan, output_path)
     return _job_summary(job_id, output_path, plan)
 
@@ -337,6 +464,7 @@ def import_edited_doc2us_queue(
             plan.at[target_idx, 'status'] = 'READY'
             plan.at[target_idx, 'skip_reason'] = ''
         imported_count += 1
+    plan = apply_review_defaults(plan)
     _write_plan_workbook(plan, plan_path)
     package = create_submit_package(jobs_dir, job_id)
     return {
@@ -349,7 +477,7 @@ def import_edited_doc2us_queue(
     }
 
 
-def deploy_doc2us_ready_rows(jobs_dir: str | Path, job_id: str, live_submit: bool = False) -> Dict[str, Any]:
+def deploy_doc2us_ready_rows(jobs_dir: str | Path, job_id: str, live_submit: bool = False, app_email: str = "") -> Dict[str, Any]:
     """Prepare or execute the end-phase Doc2Us deployment result.
 
     One READY medication row equals one prescription request. live_submit=True runs
@@ -362,16 +490,26 @@ def deploy_doc2us_ready_rows(jobs_dir: str | Path, job_id: str, live_submit: boo
     manifest['prescription_count'] = int(package['count'])
     manifest['medication_count'] = int(package['count'])
     manifest['invalid_count'] = int(package.get('invalid_count', 0))
+    staff_account = get_staff_account_by_app_email(app_email) if app_email else (get_staff_accounts()[0] if get_staff_accounts() else None)
+    if staff_account:
+        manifest['staff_label'] = staff_account.get('staff_label', '')
+        manifest['doc2us_account_email'] = staff_account.get('doc2us_email', '')
     if live_submit and int(package['count']) > 0:
         try:
             def _progress(event: dict[str, Any]) -> None:
-                write_deployment_progress(jobs_dir, job_id, {'status': 'running', **event})
+                base = {'status': 'running'}
+                if staff_account:
+                    base.update({'staff_label': staff_account.get('staff_label', ''), 'doc2us_account_email': staff_account.get('doc2us_email', '')})
+                write_deployment_progress(jobs_dir, job_id, {**base, **event})
 
             live = submit_doc2us_queue_live(
                 package['queue_path'],
                 screenshot_dir=job_dir / 'doc2us_live_screenshots',
                 final_submit=True,
                 progress_callback=_progress,
+                login_email=staff_account.get('doc2us_email') if staff_account else None,
+                login_password=staff_account.get('doc2us_password') if staff_account else None,
+                account_label=staff_account.get('staff_label', '') if staff_account else '',
             )
         except Exception as exc:
             live = {
@@ -440,6 +578,8 @@ def create_submit_package(jobs_dir: str | Path, job_id: str) -> Dict[str, Any]:
     job_dir = _safe_job_dir(jobs_dir, job_id)
     output_path = _plan_path(job_dir)
     plan = pd.read_excel(output_path, sheet_name='EPS_PLAN')
+    plan = apply_review_defaults(plan)
+    _write_plan_workbook(plan, output_path)
     invalid_count = 0
     for idx, row in plan[plan['status'].astype(str).str.upper() == 'READY'].iterrows():
         issues = validate_doc2us_ready_row(row)

@@ -90,16 +90,19 @@ def _launch_chromium(playwright, launch_args: dict[str, Any]):
 
 
 class Doc2UsLiveRunner:
-    def __init__(self, screenshot_dir: str | Path, headless: bool = True, final_submit: bool = True):
+    def __init__(self, screenshot_dir: str | Path, headless: bool = True, final_submit: bool = True, login_email: str | None = None, login_password: str | None = None, account_label: str = ''):
         self.screenshot_dir = Path(screenshot_dir)
         self.screenshot_dir.mkdir(parents=True, exist_ok=True)
         self.headless = bool(headless)
         self.final_submit = bool(final_submit)
+        self.login_email = login_email
+        self.login_password = login_password
+        self.account_label = account_label
 
     def run_queue(self, queue: pd.DataFrame, progress_callback: Callable[[dict[str, Any]], None] | None = None) -> LiveSubmitResult:
         from playwright.sync_api import sync_playwright
 
-        email, password = _env_login()
+        email, password = (self.login_email, self.login_password) if self.login_email and self.login_password else _env_login()
         queue = queue.reset_index(drop=True)
         total = int(len(queue))
         patient_groups = int(queue['patient_ic'].fillna('').astype(str).str.strip().nunique()) if 'patient_ic' in queue.columns else 0
@@ -119,7 +122,7 @@ class Doc2UsLiveRunner:
                     **payload,
                 })
 
-        progress('starting_browser')
+        progress('starting_browser', doc2us_account_label=self.account_label, doc2us_account_email=email)
         with sync_playwright() as p:
             launch_args: dict[str, Any] = {
                 'headless': self.headless,
@@ -141,7 +144,7 @@ class Doc2UsLiveRunner:
             page = browser.new_page(viewport={'width': 1440, 'height': 1000})
             try:
                 self._login(page, email, password)
-                progress('logged_in')
+                progress('logged_in', doc2us_account_label=self.account_label, doc2us_account_email=email)
                 last_ic = ''
                 for pos, row in queue.iterrows():
                     ic_now = _clean(row.get('patient_ic'))

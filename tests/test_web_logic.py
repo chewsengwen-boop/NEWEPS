@@ -170,17 +170,19 @@ def test_ready_row_validation_requires_doc2us_fields_before_deploy():
     assert 'Doc2Us indication dropdown must be selected' in validate_doc2us_ready_row(row)
 
 
-def test_create_submit_package_downgrades_invalid_ready_rows_to_review(tmp_path):
+def test_review_defaults_refill_blank_doc2us_fields_before_package(tmp_path):
     job = _sample_job(tmp_path)
     df = load_plan(tmp_path, job['job_id'])
     idx = int(df[df.status == 'READY'].index[0])
-    save_edited_plan(tmp_path, job['job_id'], {str(idx): {'doc2us_icd_code': '', 'doc2us_indication': ''}})
+    save_edited_plan(tmp_path, job['job_id'], {str(idx): {'doc2us_icd_code': '', 'doc2us_indication': '', 'bp': '', 'frequency': '', 'duration_days': ''}})
     package = create_submit_package(tmp_path, job['job_id'])
-    assert package['invalid_count'] == 1
-    assert package['count'] == job['counts']['READY'] - 1
+    assert package['invalid_count'] == 0
     refreshed = load_plan(tmp_path, job['job_id'])
-    assert refreshed.loc[idx, 'status'] == 'REVIEW'
-    assert 'Doc2Us indication dropdown must be selected' in refreshed.loc[idx, 'skip_reason']
+    assert refreshed.loc[idx, 'doc2us_icd_code']
+    assert refreshed.loc[idx, 'doc2us_indication']
+    assert refreshed.loc[idx, 'bp'] == '120/80'
+    assert refreshed.loc[idx, 'frequency'] == 'Once daily'
+    assert int(refreshed.loc[idx, 'duration_days']) > 0
 
 
 def test_import_edited_doc2us_queue_roundtrip_revalidates_rows(tmp_path):
@@ -237,9 +239,9 @@ def test_live_deploy_invokes_doc2us_submitter_and_records_real_counts(tmp_path, 
     job = _sample_job(tmp_path)
     calls = []
 
-    def fake_submit(queue_path, screenshot_dir, final_submit=True, progress_callback=None):
+    def fake_submit(queue_path, screenshot_dir, final_submit=True, progress_callback=None, login_email=None, login_password=None, account_label=''):
         q = pd.read_excel(queue_path, sheet_name='DOC2US_READY_UPLOAD')
-        calls.append((Path(queue_path), Path(screenshot_dir), final_submit, len(q), progress_callback is not None))
+        calls.append((Path(queue_path), Path(screenshot_dir), final_submit, len(q), progress_callback is not None, login_email, login_password, account_label))
         if progress_callback:
             progress_callback({'event': 'logged_in', 'submitted_count': 0, 'failed_count': 0, 'results': [], 'total_rows': len(q), 'patient_groups': q['patient_ic'].astype(str).nunique()})
         return {
@@ -249,11 +251,15 @@ def test_live_deploy_invokes_doc2us_submitter_and_records_real_counts(tmp_path, 
             'results': [{'row': i, 'status': 'VERIFIED', 'before_count': 36 + i, 'after_count': 37 + i} for i in range(len(q))],
         }
 
+    monkeypatch.setenv('EPS_STAFF_ACCOUNTS_JSON', '[{"staff_label":"Staff A","app_email":"staffa@example.com","app_password":"app-pass","doc2us_email":"doc-a@example.com","doc2us_password":"doc-pass"}]')
     monkeypatch.setattr(web_logic, 'submit_doc2us_queue_live', fake_submit)
-    result = deploy_doc2us_ready_rows(tmp_path, job['job_id'], live_submit=True)
+    result = deploy_doc2us_ready_rows(tmp_path, job['job_id'], live_submit=True, app_email='staffa@example.com')
     assert calls
     assert calls[0][2] is True
     assert calls[0][4] is True
+    assert calls[0][5] == 'doc-a@example.com'
+    assert calls[0][6] == 'doc-pass'
+    assert calls[0][7] == 'Staff A'
     assert result['dry_run'] is False
     assert result['live_submit_enabled'] is True
     assert result['submitted_count'] == job['counts']['READY']
@@ -264,3 +270,24 @@ def test_live_deploy_invokes_doc2us_submitter_and_records_real_counts(tmp_path, 
     assert result['batch_mode'] is True
     assert result['login_count'] == 1
     assert result['patient_group_count'] >= 1
+    assert result['staff_label'] == 'Staff A'
+    assert result['doc2us_account_email'] == 'doc-a@example.com'
+
+
+
+def test_staff_accounts_are_limited_to_seven(monkeypatch):
+    accounts = []
+    for i in range(9):
+        accounts.append({
+            "staff_label": f"Staff {i}",
+            "app_email": f"staff{i}@example.com",
+            "app_password": "app-pass",
+            "doc2us_email": f"doc{i}@example.com",
+            "doc2us_password": "doc-pass",
+        })
+    monkeypatch.setenv('EPS_STAFF_ACCOUNTS_JSON', __import__('json').dumps(accounts))
+    parsed = web_logic.get_staff_accounts()
+    assert len(parsed) == 7
+    assert parsed[-1]['staff_label'] == 'Staff 6'
+    assert web_logic.authenticate('staff6@example.com', 'app-pass') is True
+    assert web_logic.authenticate('staff7@example.com', 'app-pass') is False
