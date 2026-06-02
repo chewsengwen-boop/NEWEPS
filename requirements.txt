@@ -1,6 +1,9 @@
-__pycache__/
-*.pyc
-.pytest_cache/
-jobs/
-.env
-.venv/
+ fastapi
+    uvicorn[standard]
+    python-multipart
+    jinja2
+    pandas
+    openpyxl
+    playwright
+    httpx
+    pytest
