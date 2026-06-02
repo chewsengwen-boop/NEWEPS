@@ -159,8 +159,14 @@ class Doc2UsLiveRunner:
         page.get_by_text('Create New Medication Record', exact=False).click(force=True, timeout=30000)
         page.wait_for_timeout(1500)
 
-        icd = _clean(row.get('doc2us_icd_code')) or _clean(row.get('diagnosis_search')) or _clean(row.get('doc2us_indication')) or 'BA00.Z'
-        self._add_diagnosis(page, icd)
+        diagnosis_candidates = [
+            _clean(row.get('doc2us_icd_code')),
+            _clean(row.get('doc2us_indication')),
+            _clean(row.get('diagnosis_search')),
+            _clean(row.get('indication')),
+            'BA00.Z',
+        ]
+        self._add_diagnosis(page, diagnosis_candidates)
         self._add_drug(page, row)
         self._continue_and_submit_questionnaire(page, row)
 
@@ -194,7 +200,7 @@ class Doc2UsLiveRunner:
             'verification_screenshot': verification_screenshot,
         }
 
-    def _add_diagnosis(self, page, icd_text: str) -> None:
+    def _add_diagnosis(self, page, diagnosis_candidates: str | list[str]) -> None:
         # The new-medication page already opens with one blank diagnosis row.
         # Clicking Add Diagnosis first creates a second unused blank row, and
         # Doc2Us blocks Continue with: "Please fill in all diagnoses and remove unused rows."
@@ -202,16 +208,63 @@ class Doc2UsLiveRunner:
             page.get_by_role('button', name='Add Diagnosis').first.click(force=True)
             page.wait_for_timeout(300)
         select = page.locator('mat-select').first
-        self._select_option(page, select, icd_text.split(' - ')[0])
+        if isinstance(diagnosis_candidates, str):
+            candidates = [diagnosis_candidates]
+        else:
+            candidates = [c for c in diagnosis_candidates if _clean(c)]
+        # Rendered Doc2Us ICD options are ICD-11 labels. Some old/imported rows
+        # carry ICD-10 codes such as I10, which are not selectable. Try code,
+        # description, indication, and finally the portal's hypertension default.
+        legacy_map = {
+            'I10': ['BA00.Z', 'Essential hypertension'],
+            'E11': ['5A11', 'Type 2 diabetes'],
+            'E10': ['5A10', 'Type 1 diabetes'],
+            'E78': ['5C80.0Z', 'Hypercholesterolaemia'],
+            'K21': ['DA22.Z', 'Gastro-oesophageal reflux'],
+        }
+        expanded: list[str] = []
+        for candidate in candidates:
+            text = _clean(candidate)
+            if text and text not in expanded:
+                expanded.append(text)
+            for mapped in legacy_map.get(text.upper(), []):
+                if mapped not in expanded:
+                    expanded.append(mapped)
+        if 'BA00.Z' not in expanded:
+            expanded.append('BA00.Z')
+        select.click(force=True, timeout=15000)
+        page.wait_for_timeout(300)
+        options = page.locator('mat-option')
+        options.first.wait_for(state='visible', timeout=15000)
+        option_texts = options.all_inner_texts()
+        for candidate in expanded:
+            needle = candidate.split(' - ')[0].strip()
+            match = options.filter(has_text=needle).first
+            if match.count() and match.is_visible():
+                match.click(force=True)
+                page.wait_for_timeout(300)
+                return
+        raise RuntimeError(
+            'No selectable Doc2Us diagnosis matched candidates '
+            f'{expanded}. Visible options: {option_texts[:20]}'
+        )
 
     def _add_drug(self, page, row: pd.Series) -> None:
         page.get_by_role('button', name='ADD DRUG').click(force=True, timeout=30000)
         page.wait_for_timeout(700)
         modal = page.locator('ngb-modal-window')
         self._select_option(page, modal.locator('mat-select').nth(0), _clean(row.get('route')) or 'Oral')
-        self._select_option(page, modal.locator('mat-select').nth(1), _clean(row.get('dose_unit')) or 'tab(s)/cap(s)')
+        dose_unit = _clean(row.get('dose_unit')) or 'tab(s)/cap(s)'
+        if dose_unit.lower() in {'tablet', 'tablets', 'tab', 'tabs', 'capsule', 'capsules', 'cap', 'caps'}:
+            dose_unit = 'tab(s)/cap(s)'
+        self._select_option(page, modal.locator('mat-select').nth(1), dose_unit)
         self._select_option(page, modal.locator('mat-select').nth(2), _clean(row.get('frequency')) or 'Once daily')
-        self._select_option(page, modal.locator('mat-select').nth(3), _clean(row.get('prescribed_unit')) or 'tablet(s)')
+        prescribed_unit = _clean(row.get('prescribed_unit')) or 'tablet(s)'
+        if prescribed_unit.lower() in {'tablet', 'tablets', 'tab', 'tabs'}:
+            prescribed_unit = 'tablet(s)'
+        elif prescribed_unit.lower() in {'capsule', 'capsules', 'cap', 'caps'}:
+            prescribed_unit = 'capsule(s)'
+        self._select_option(page, modal.locator('mat-select').nth(3), prescribed_unit)
         medication_name = _clean(row.get('item_name'))
         med_input = modal.locator('input[placeholder="Medication Name"]')
         # Doc2Us search does not match outlet stock names containing pack sizes,
