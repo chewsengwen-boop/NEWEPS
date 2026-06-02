@@ -291,3 +291,51 @@ def test_staff_accounts_are_limited_to_seven(monkeypatch):
     assert parsed[-1]['staff_label'] == 'Staff 6'
     assert web_logic.authenticate('staff6@example.com', 'app-pass') is True
     assert web_logic.authenticate('staff7@example.com', 'app-pass') is False
+
+def test_doc2us_queue_and_manifest_preserve_leading_zero_patient_ic(tmp_path):
+    job_id = 'leadingzerojob'
+    job_dir = tmp_path / job_id
+    job_dir.mkdir()
+    plan = pd.DataFrame([{
+        'status': 'READY',
+        'skip_reason': '',
+        'patient_name': 'JEFFERY SIA MING HONG',
+        'patient_ic': '000704131157',
+        'gender': 'Male',
+        'mobile': '601125047322',
+        'email': '000704131157@doc2us.com',
+        'item_name': 'VOZAN 20MG FILM COATED TABLETS 3X10S',
+        'active_ingredients': 'VONOPRAZAN',
+        'indication': 'GORD',
+        'doc2us_icd_code': 'DA22.Z',
+        'doc2us_indication': 'Gastro-oesophageal reflux disease, unspecified',
+        'diagnosis_search': 'Gastro-oesophageal reflux disease',
+        'route': 'Oral',
+        'dose': '1',
+        'dose_unit': 'tab(s)/cap(s)',
+        'frequency': 'Once daily',
+        'duration_days': 30,
+        'prescribed_amount': 30,
+        'prescribed_unit': 'tablet(s)',
+        'drug_remark': 'refill medication',
+        'questionnaire_mode': 'LTM',
+        'bp': '120/80',
+        'hr': '75',
+        'glucose': '6.0',
+        'last_appointment_date': '',
+        'next_appointment_date': '2026-07-03',
+        'follow_up_under': 'klinik kesihatan',
+        'referred_by': 'Johnny Chew Seng Wen',
+        'pharmacist_reg_no': '018161',
+        'screening_remarks': 'come refill medication',
+        'qty': 1,
+        'medication_class': 'Gastrointestinal',
+    }], dtype=object)
+    with pd.ExcelWriter(job_dir / 'raw_EPS_PLAN.xlsx', engine='openpyxl') as w:
+        plan.to_excel(w, index=False, sheet_name='EPS_PLAN')
+    package = create_submit_package(tmp_path, job_id)
+    queue = pd.read_excel(package['queue_path'], sheet_name='DOC2US_READY_UPLOAD', dtype=object)
+    assert str(queue.loc[0, 'patient_ic']) == '000704131157'
+    manifest = build_doc2us_automation_manifest(package['queue_path'], dry_run=True)
+    assert manifest['steps'][1]['patient_ic'] == '000704131157'
+

@@ -405,9 +405,9 @@ def save_edited_plan(jobs_dir: str | Path, job_id: str, edits: dict[str, dict[st
 
 def _load_doc2us_queue(path: str | Path) -> pd.DataFrame:
     try:
-        return pd.read_excel(path, sheet_name='DOC2US_READY_UPLOAD')
+        return pd.read_excel(path, sheet_name='DOC2US_READY_UPLOAD', dtype=object)
     except ValueError:
-        return pd.read_excel(path)
+        return pd.read_excel(path, dtype=object)
 
 
 def _normalise_deploy_frame(df: pd.DataFrame) -> pd.DataFrame:
@@ -432,7 +432,7 @@ def import_edited_doc2us_queue(
     import_path.write_bytes(file_bytes)
     imported = _normalise_deploy_frame(_load_doc2us_queue(import_path))
     plan_path = _plan_path(job_dir)
-    plan = pd.read_excel(plan_path, sheet_name='EPS_PLAN')
+    plan = pd.read_excel(plan_path, sheet_name='EPS_PLAN', dtype=object)
     imported_count = 0
     invalid_count = 0
     for _, row in imported.iterrows():
@@ -577,7 +577,7 @@ def build_doc2us_automation_manifest(queue_path: str | Path, dry_run: bool = Tru
 def create_submit_package(jobs_dir: str | Path, job_id: str) -> Dict[str, Any]:
     job_dir = _safe_job_dir(jobs_dir, job_id)
     output_path = _plan_path(job_dir)
-    plan = pd.read_excel(output_path, sheet_name='EPS_PLAN')
+    plan = pd.read_excel(output_path, sheet_name='EPS_PLAN', dtype=object)
     plan = apply_review_defaults(plan)
     _write_plan_workbook(plan, output_path)
     invalid_count = 0
