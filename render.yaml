@@ -1,16 +1,10 @@
-services:
-  - type: web
-    name: neweps
-    env: python
-    plan: starter
-    buildCommand: pip install -r requirements.txt && python -m playwright install chromium
-    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
-    envVars:
-      - key: EPS_ALLOWED_EMAIL
-        sync: false
-      - key: EPS_ALLOWED_PASSWORD
-        sync: false
-      - key: DOC2US_EMAIL
-        sync: false
-      - key: DOC2US_PASSWORD
-        sync: false
+.git
+__pycache__
+*.pyc
+.pytest_cache
+.venv
+venv
+node_modules
+.env
+jobs
+*.zip

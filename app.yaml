@@ -1,41 +1,39 @@
-FROM python:3.11-slim
+EPS Shared Web Automation
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PORT=8080
+What this is
+- A browser-based shared web app for colleagues.
+- Colleagues login using the same Doc2Us/EPS login style.
+- Pilot login enabled first:
+  qsbjc1@alpropharmacy.com / Alpro-123
+- Upload Octopus Poison B/C Excel.
+- Enter pharmacist name and registration number.
+- App generates READY / REVIEW / OMIT EPS plan and downloadable Excel.
 
-WORKDIR /app
+Important
+- This tool does not prescribe. It structures and submits data to reduce repeated entry.
+- Pharmacist review is still required before any EPS submission.
+- Current version completes shared upload/review/export. Live EPS submit should be enabled after pilot verification and EPS selector mapping.
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    chromium \
-    fonts-liberation \
-    libasound2 \
-    libatk-bridge2.0-0 \
-    libatk1.0-0 \
-    libcups2 \
-    libdbus-1-3 \
-    libdrm2 \
-    libgbm1 \
-    libgtk-3-0 \
-    libnspr4 \
-    libnss3 \
-    libx11-xcb1 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxfixes3 \
-    libxrandr2 \
-    xdg-utils \
-    && rm -rf /var/lib/apt/lists/*
+Run locally for testing
+cd /home/johnny/eps-web-automation
+python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8088
+Open: http://localhost:8088
 
-ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
-    PLAYWRIGHT_BROWSERS_PATH=0
+Deploy options
+- Render/Railway/Fly.io/DigitalOcean VPS.
+- Install requirements.txt.
+- Start command:
+  uvicorn app.main:app --host 0.0.0.0 --port $PORT
 
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+Security upgrades before public internet use
+1. Put behind HTTPS.
+2. Replace pilot hardcoded login with real encrypted user/session management or Doc2Us verification flow.
+3. Store uploads with retention policy or auto-delete.
+4. Add audit log per pharmacist and uploaded file.
+5. Keep OpenAI/ChatGPT medicine classification limited to item name/quantity only, not patient IC/name.
 
-COPY . ./
-
-EXPOSE 8080
-
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
+AI/ChatGPT integration design
+- Existing rule table runs first.
+- Unknown medicine becomes REVIEW.
+- Optional next step: call OpenAI only for unknown medicines to suggest class/indication/dose/frequency from handbook context.
+- Pharmacist approves suggestion, then saves it into medication_rules.csv/database for future use.
