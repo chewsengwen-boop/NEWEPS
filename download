@@ -1,29 +1,30 @@
+from pathlib import Path
+
 import pandas as pd
 
-from app.doc2us_live import Doc2UsLiveRunner
+from app import eps_bulk_core
 
 
-def test_plain_simvastatin_rejects_vytorin_combination_result(tmp_path):
-    runner = Doc2UsLiveRunner(tmp_path)
-    row = pd.Series({
-        'item_name': '#PHARMANIAGA SIMVASTATIN 20MG 10S',
-        'active_ingredients': 'SIMVASTATIN',
-    })
-    assert runner._active_ingredients_are_compatible(row, 'PHARMANIAGA SIMVASTATIN 20MG TABLET')
-    assert not runner._active_ingredients_are_compatible(row, 'Ezetimibe 10mg & Simvastatin 10mg Tablet (VYTORIN 10/10)')
-    assert not runner._strengths_are_compatible(row, 'Ezetimibe 10mg & Simvastatin 10mg Tablet (VYTORIN 10/10)')
+def test_item_description_active_ingredient_matches_rule_and_prefills_fields(tmp_path, monkeypatch):
+    raw_rows = [
+        ['Report title', '', '', '', '', '', '', '', '', '', '', '', ''],
+        ['Store', 'Item Division', 'Client Name', 'Client IC', 'Client Gender', 'Client Mobile', 'Sales Person', 'Item Code', 'Item Description', 'Item Name', 'Qty', 'Sales Type', 'Net Sold Price ex. MGST Tax'],
+        ['QSBFL1', '500 - POISON B', 'TEST PATIENT', '790728135127', 'M', '60123456789', 'PHARMACIST', 'L66472', 'PERINDOPRIL TERT-BUTYLAMINE', 'COVINACE 8MG 10S', '1', '0', '10'],
+    ]
+    raw_path = tmp_path / 'raw.xlsx'
+    pd.DataFrame(raw_rows).to_excel(raw_path, index=False, header=False)
 
+    monkeypatch.setattr(eps_bulk_core, 'RULES_PATH', Path(__file__).resolve().parents[1] / 'data' / 'medication_rules.csv')
+    plan = eps_bulk_core.make_plan(str(raw_path), 'PHARMACIST', '12345', pd.Timestamp('2026-06-03').date())
+    row = plan.iloc[0]
 
-def test_registration_form_text_is_treated_as_already_open(tmp_path):
-    runner = Doc2UsLiveRunner(tmp_path)
-
-    class FakePage:
-        def locator(self, selector):
-            class Loc:
-                def count(self): return 0
-            return Loc()
-
-    page = FakePage()
-    page_text = 'Register New Patient Kindly Fill In All The Details Below *Email *Full Name (As per IC/Passport) *IC Number/Passport Number Enter to search *D.O.B *Contact No *Password Submit'
-    runner._body_text_safe = lambda page, timeout=3000: page_text
-    assert runner._registration_form_visible(page)
+    assert row['active_ingredients'] == 'PERINDOPRIL TERT-BUTYLAMINE'
+    assert row['indication'] == 'Hypertension'
+    assert row['doc2us_icd_code'] == 'BA00.Z'
+    assert row['doc2us_indication'] == 'Essential hypertension, unspecified'
+    assert row['frequency'] == 'Every morning'
+    assert int(row['duration_days']) == 10
+    assert int(row['prescribed_amount']) == 10
+    assert row['bp'] == '120/80'
+    assert row['hr'] == '75'
+    assert row['glucose'] == '6.0'

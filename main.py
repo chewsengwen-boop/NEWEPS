@@ -467,6 +467,22 @@ class Doc2UsLiveRunner:
                 clicked = True
                 break
         if not clicked:
+            # Some Doc2Us builds navigate directly to the Register New Patient
+            # form after a not-found IC search. The page text still contains the
+            # "Register New Patient" heading, but there is no clickable button
+            # because the form is already open. Continue filling instead of
+            # failing with "no Register New Patient button was available".
+            if self._registration_form_visible(page):
+                clicked = True
+            else:
+                try:
+                    page.goto('https://eps.doc2us.com/register-new-patient', wait_until='domcontentloaded', timeout=30000)
+                    page.wait_for_timeout(1500)
+                    if self._registration_form_visible(page):
+                        clicked = True
+                except Exception:
+                    pass
+        if not clicked:
             body = self._body_text_safe(page, timeout=5000)
             raise RuntimeError(f'Patient {ic} not found and no Register New Patient button was available. Page: {body[:800]}')
         page.wait_for_timeout(2000)
@@ -578,6 +594,19 @@ class Doc2UsLiveRunner:
         if popup.count() and popup.get_by_role('button', name='OK').count():
             popup.get_by_role('button', name='OK').click(force=True)
             page.wait_for_timeout(1000)
+
+    def _registration_form_visible(self, page) -> bool:
+        try:
+            body = self._body_text_safe(page, timeout=3000)
+            required = ['Full Name', 'IC Number', 'D.O.B', 'Contact No', 'Password', 'Submit']
+            if all(text.lower() in body.lower() for text in required):
+                return True
+        except Exception:
+            pass
+        try:
+            return page.locator('input[placeholder*="IC" i], input[formcontrolname="ic"], input[formcontrolname="nric"]').count() > 0
+        except Exception:
+            return False
 
     def _add_diagnosis(self, page, diagnosis_candidates: str | list[str]) -> None:
         # The new-medication page already opens with one blank diagnosis row.
@@ -743,6 +772,10 @@ class Doc2UsLiveRunner:
             except Exception:
                 continue
             result_tokens = set(self._significant_tokens(text))
+            if not self._strengths_are_compatible(row, text):
+                continue
+            if not self._active_ingredients_are_compatible(row, text):
+                continue
             # Require at least one non-manufacturer medication/ingredient token
             # that came from the reviewed row, not only from a broad maker name.
             overlap = result_tokens & acceptable
@@ -759,6 +792,34 @@ class Doc2UsLiveRunner:
                 best = loc
                 best_score = score
         return best
+
+    def _strengths_are_compatible(self, row: pd.Series, result_text: str) -> bool:
+        expected = set(re.findall(r'\b\d+(?:\.\d+)?\s*(?:MG|MCG|G|ML)\b', _clean(row.get('item_name')).upper()))
+        expected |= set(re.findall(r'\b\d+(?:\.\d+)?\s*(?:MG|MCG|G|ML)\b', _clean(row.get('active_ingredients')).upper()))
+        if not expected:
+            return True
+        found = set(re.findall(r'\b\d+(?:\.\d+)?\s*(?:MG|MCG|G|ML)\b', _clean(result_text).upper()))
+        # If Doc2Us result shows strengths, at least one must match the raw row.
+        return not found or bool(expected & found)
+
+    def _active_ingredients_are_compatible(self, row: pd.Series, result_text: str) -> bool:
+        expected = set(self._significant_tokens(_clean(row.get('active_ingredients'))))
+        if not expected:
+            return True
+        text_tokens = set(self._significant_tokens(result_text))
+        known_ingredients = {
+            'EZETIMIBE', 'SIMVASTATIN', 'ATORVASTATIN', 'ROSUVASTATIN', 'PRAVASTATIN',
+            'AMLODIPINE', 'VALSARTAN', 'IRBESARTAN', 'METFORMIN', 'DAPAGLIFLOZIN',
+            'EMPAGLIFLOZIN', 'LINAGLIPTIN', 'GLICLAZIDE', 'ACYCLOVIR', 'CELECOXIB',
+            'ETORICOXIB', 'PANTOPRAZOLE', 'OMEPRAZOLE', 'MIRABEGRON', 'ACETAZOLAMIDE',
+            'CLOTRIMAZOLE', 'BETAMETHASONE', 'ORPHENADRINE', 'PARACETAMOL'
+        }
+        unexpected = (text_tokens & known_ingredients) - expected
+        # Single-ingredient rows must not select combination products such as
+        # VYTORIN (EZETIMIBE + SIMVASTATIN) for plain SIMVASTATIN.
+        if unexpected:
+            return False
+        return True
 
     def _only_broad_manufacturer_overlap(self, tokens: set[str]) -> bool:
         broad = {'PHARMANIAGA', 'SANDOZ', 'APO', 'APOTHECARY', 'RX'}

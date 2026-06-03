@@ -1,1 +1,6 @@
-web: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+__pycache__/
+*.pyc
+.pytest_cache/
+jobs/
+.env
+.venv/

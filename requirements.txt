@@ -1,9 +1,1 @@
-    fastapi
-    uvicorn[standard]
-    python-multipart
-    jinja2
-    pandas
-    openpyxl
-    playwright
-    httpx
-    pytest
+3.11.9
