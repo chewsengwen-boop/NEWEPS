@@ -13,3 +13,5 @@ services:
         sync: false
       - key: DOC2US_PASSWORD
         sync: false
+      - key: EPS_STAFF_ACCOUNTS_JSON
+        sync: false

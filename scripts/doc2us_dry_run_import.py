@@ -7,7 +7,7 @@ Safety design:
 - Use this after pharmacist review of DOC2US_READY_UPLOAD. Doctor approval remains required inside Doc2Us.
 
 Usage:
-  python scripts/doc2us_dry_run_import.py jobs/<job_id>/*_DOC2US_READY_QUEUE.xlsx --email qsbjc1@alpropharmacy.com
+  python scripts/doc2us_dry_run_import.py jobs/<job_id>/*_DOC2US_READY_QUEUE.xlsx --email staff@alpropharmacy.com
 
 Set DOC2US_PASSWORD in the environment or pass --password for local testing.
 """
@@ -29,7 +29,7 @@ from app.web_logic import build_doc2us_automation_manifest  # noqa: E402
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument('queue_xlsx', help='Doc2Us READY queue workbook')
-    ap.add_argument('--email', default=os.environ.get('DOC2US_EMAIL', 'qsbjc1@alpropharmacy.com'))
+    ap.add_argument('--email', default=os.environ.get('DOC2US_EMAIL', ''))
     ap.add_argument('--password', default=os.environ.get('DOC2US_PASSWORD', ''))
     ap.add_argument('--dry-run', action='store_true', default=True)
     args = ap.parse_args()

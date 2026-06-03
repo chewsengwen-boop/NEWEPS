@@ -84,3 +84,20 @@ def test_website_deploy_button_runs_live_submitter_without_500(tmp_path, monkeyp
     assert 'Doc2Us Batch Deployment Running' in response.text or 'Doc2Us Live Deployment Status' in response.text
     assert 'Staff A' in response.text
     assert (tmp_path / job_id / 'doc2us_deployment_progress.json').exists()
+
+
+def test_review_page_uses_dropdowns_for_frequency_duration_and_amount(tmp_path, monkeypatch):
+    job_id = _make_ready_job(tmp_path)
+    monkeypatch.setattr(main, 'JOBS_DIR', tmp_path)
+    client = TestClient(main.app)
+    client.cookies.set('eps_email', 'staffa@example.com')
+
+    response = client.get(f'/review/{job_id}')
+
+    assert response.status_code == 200
+    assert '<select name="row_0_frequency">' in response.text
+    assert '<select name="row_0_duration_days">' in response.text
+    assert '<select name="row_0_prescribed_amount">' in response.text
+    assert '<select name="row_0_prescribed_unit">' in response.text
+    assert '<option value="Once daily" selected>Once daily</option>' in response.text
+    assert '<option value="30" selected>30</option>' in response.text

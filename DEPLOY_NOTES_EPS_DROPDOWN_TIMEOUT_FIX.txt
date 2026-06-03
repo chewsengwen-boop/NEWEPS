@@ -1,0 +1,27 @@
+EPS package update
+
+Included changes:
+1. Review/Edit page dropdowns added for:
+   - Frequency
+   - Duration days
+   - Prescribed amount
+   - Prescribed unit
+2. Mass import timeout hardening:
+   - safer patient-search navigation
+   - safe body-text fallback when locator("body").inner_text times out
+   - diagnosis dropdown retry logic
+   - diagnostic screenshot diagnosis_options_timeout.png when ICD options fail to load
+3. Multi-account login support remains through EPS_STAFF_ACCOUNTS_JSON.
+
+Deployment environment variables:
+- Preferred multi-account key: EPS_STAFF_ACCOUNTS_JSON
+- Single-account fallback keys, if not using multi-account:
+  DOC2US_EMAIL / DOC2US_PASSWORD
+  or EPS_ALLOWED_EMAIL / EPS_ALLOWED_PASSWORD
+
+Important:
+No live account passwords are stored in this package. Add passwords only in the hosting platform environment variables, then restart/redeploy the app.
+
+Validation run locally:
+- python3 -m py_compile app/main.py app/doc2us_live.py app/web_logic.py
+- PYTHONPATH=. pytest -q tests/test_main_deploy_route.py

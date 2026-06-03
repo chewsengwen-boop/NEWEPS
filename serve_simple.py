@@ -58,7 +58,7 @@ class H(BaseHTTPRequestHandler):
             if not self.logged(): self.send_response(303); self.send_header('Location','/'); self.end_headers(); return
             body='<main class="card"><h1>Upload Octopus Excel</h1><form method="post" action="/process" enctype="multipart/form-data"><label>Pharmacist name <input name="pharmacist_name" required></label><label>Registration number <input name="reg_no" required></label><label>Application date <input type="date" name="apply_date" value="2026-06-01" required></label><label>Raw Excel <input type="file" name="excel_file" required></label><button>Generate EPS Plan</button></form><p>Defaults: BP 120/80, HR 75, Glucose 6.0, LTM, refill medication.</p></main>'
             self.send_html(page('Upload',body)); return
-        body='<main class="card"><h1>EPS Shared Automation Login</h1><form method="post" action="/login"><label>Email <input type="email" name="email" value="qsbjc1@alpropharmacy.com" required></label><label>Password <input type="password" name="password" required></label><button>Login</button></form><p>This tool submits data flow; it does not prescribe. Pharmacist review remains required.</p></main>'
+        body='<main class="card"><h1>EPS Shared Automation Login</h1><form method="post" action="/login"><label>Email <input type="email" name="email" placeholder="staff@alpropharmacy.com" required></label><label>Password <input type="password" name="password" required></label><button>Login</button></form><p>This tool submits data flow; it does not prescribe. Pharmacist review remains required.</p></main>'
         self.send_html(page('Login',body))
     def do_POST(self):
         n=int(self.headers.get('Content-Length','0')); body=self.rfile.read(n); path=urlparse(self.path).path

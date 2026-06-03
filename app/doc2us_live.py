@@ -84,8 +84,10 @@ def _gender_from_row(row: pd.Series) -> str:
 
 
 def _env_login() -> tuple[str, str]:
-    email = os.environ.get('DOC2US_EMAIL') or os.environ.get('EPS_ALLOWED_EMAIL') or 'qsbjc1@alpropharmacy.com'
-    password = os.environ.get('DOC2US_PASSWORD') or os.environ.get('EPS_ALLOWED_PASSWORD') or 'Alpro-123'
+    email = os.environ.get('DOC2US_EMAIL') or os.environ.get('EPS_ALLOWED_EMAIL') or ''
+    password = os.environ.get('DOC2US_PASSWORD') or os.environ.get('EPS_ALLOWED_PASSWORD') or ''
+    if not email or not password:
+        raise RuntimeError('Doc2Us login is not configured. Set EPS_STAFF_ACCOUNTS_JSON, or DOC2US_EMAIL/DOC2US_PASSWORD, or EPS_ALLOWED_EMAIL/EPS_ALLOWED_PASSWORD.')
     return email, password
 
 
@@ -280,11 +282,35 @@ class Doc2UsLiveRunner:
             pass
         return False
 
+    def _body_text_safe(self, page, timeout: int = 20000) -> str:
+        """Read body text on slow Angular pages without failing on locator timeout."""
+        try:
+            page.wait_for_selector('body', state='attached', timeout=timeout)
+            return page.locator('body').inner_text(timeout=timeout)
+        except Exception:
+            try:
+                return page.evaluate("() => document.body ? (document.body.innerText || document.body.textContent || '') : ''") or ''
+            except Exception:
+                return ''
+
+    def _goto_patient_search(self, page, ic: str) -> None:
+        """Open patient search; Doc2Us often keeps network requests open, so do not rely only on networkidle."""
+        url = f'https://eps.doc2us.com/medication-record;searchKey={ic}'
+        try:
+            page.goto(url, wait_until='domcontentloaded', timeout=60000)
+        except Exception:
+            page.goto(url, wait_until='commit', timeout=60000)
+        try:
+            page.wait_for_load_state('networkidle', timeout=10000)
+        except Exception:
+            pass
+        page.wait_for_selector('body', state='attached', timeout=30000)
+        page.wait_for_timeout(1500)
+
     def _patient_record_count(self, page, ic: str) -> int | None:
         """Return Total Medication Record from the patient search page, if visible."""
-        page.goto(f'https://eps.doc2us.com/medication-record;searchKey={ic}', wait_until='networkidle', timeout=60000)
-        page.wait_for_timeout(2000)
-        text = page.locator('body').inner_text(timeout=10000)
+        self._goto_patient_search(page, ic)
+        text = self._body_text_safe(page, timeout=20000)
         pattern = re.compile(rf'{re.escape(ic)}\s+\S+\s+(?:Male|Female|Other)\s+(\d+)\b', re.IGNORECASE)
         match = pattern.search(text)
         if match:
@@ -313,7 +339,7 @@ class Doc2UsLiveRunner:
             if page.get_by_role('button', name='Medication Record').count():
                 page.get_by_role('button', name='Medication Record').first.click(force=True)
             else:
-                body = page.locator('body').inner_text(timeout=5000)
+                body = self._body_text_safe(page, timeout=5000)
                 raise RuntimeError(f'Patient registration completed but Medication Record button is still unavailable for IC {ic}. Page: {body[:500]}')
         page.wait_for_timeout(1000)
         page.get_by_text('Create New Medication Record', exact=False).click(force=True, timeout=30000)
@@ -434,18 +460,17 @@ class Doc2UsLiveRunner:
         # centered "Register New Patient" button. Directly opening guessed
         # /register-patient routes can bounce back to the login page, so always
         # start from the search result and click the visible button first.
-        page.goto(f'https://eps.doc2us.com/medication-record;searchKey={ic}', wait_until='networkidle', timeout=60000)
-        page.wait_for_timeout(1500)
+        self._goto_patient_search(page, ic)
         clicked = False
         for text in ['Register New Patient', 'Register Patient', 'Add Patient', 'Create Patient', 'New Patient', 'Add New Patient']:
             if self._click_button_text(page, text, timeout=5000):
                 clicked = True
                 break
         if not clicked:
-            body = page.locator('body').inner_text(timeout=5000)
+            body = self._body_text_safe(page, timeout=5000)
             raise RuntimeError(f'Patient {ic} not found and no Register New Patient button was available. Page: {body[:800]}')
         page.wait_for_timeout(2000)
-        body_after_register_click = page.locator('body').inner_text(timeout=5000)
+        body_after_register_click = self._body_text_safe(page, timeout=5000)
         if 'No Patient Found' in body_after_register_click and 'Register New Patient' in body_after_register_click:
             raise RuntimeError(f'Clicked Register New Patient for IC {ic}, but Doc2Us stayed on the patient list page. URL: {page.url}. Page: {body_after_register_click[:800]}')
         self._fill_first_visible(page, [
@@ -473,7 +498,7 @@ class Doc2UsLiveRunner:
         self._fill_first_visible(page, [
             'input[formcontrolname="email"]', 'input[type="email"]', 'input[name="email"]', 'input[placeholder*="Email" i]'
         ], email)
-        patient_password = 'Alpro-123'
+        patient_password = os.environ.get('DOC2US_PATIENT_DEFAULT_PASSWORD', 'Patient-123')
         self._fill_first_visible(page, [
             'input[formcontrolname="password"]', 'input[type="password"]', 'input[name="password"]', 'input[placeholder*="Password" i]'
         ], patient_password)
@@ -546,7 +571,7 @@ class Doc2UsLiveRunner:
                 page.wait_for_timeout(3500)
                 break
         else:
-            body = page.locator('body').inner_text(timeout=5000)
+            body = self._body_text_safe(page, timeout=5000)
             raise RuntimeError('Patient registration form filled, but no Register/Save/Submit button was found. Page: ' + body[:800])
         # Accept confirmation dialog if the portal shows one.
         popup = page.locator('ngb-modal-window').last
@@ -588,11 +613,31 @@ class Doc2UsLiveRunner:
             expanded.append('BA00.Z')
         select.click(force=True, timeout=15000)
         # The first mat-option is a disabled ngx-mat-select-search input. On the
-        # live portal the real ICD options can arrive a moment later; reading too
-        # early sees only the blank search row and falsely fails.
-        page.wait_for_function("document.querySelectorAll('mat-option:not(.mat-option-disabled)').length > 0", timeout=20000)
-        page.wait_for_timeout(300)
+        # live portal the real ICD options can arrive a moment later; during mass
+        # import the Angular overlay may be slow or blank, so retry opening and
+        # wait for visible, non-disabled options before reading text.
         options = page.locator('mat-option:not(.mat-option-disabled)')
+        for attempt in range(3):
+            try:
+                page.wait_for_function("document.querySelectorAll('mat-option:not(.mat-option-disabled)').length > 0", timeout=20000)
+                if options.count():
+                    break
+            except Exception:
+                if attempt == 2:
+                    shot = self.screenshot_dir / 'diagnosis_options_timeout.png'
+                    try:
+                        page.screenshot(path=str(shot), full_page=True)
+                    except Exception:
+                        pass
+                    body = self._body_text_safe(page, timeout=5000)
+                    raise RuntimeError(f'Doc2Us diagnosis dropdown did not load selectable options after 3 attempts. Screenshot: {shot}. Page: {body[:500]}')
+                try:
+                    page.keyboard.press('Escape')
+                    page.wait_for_timeout(500)
+                    select.click(force=True, timeout=15000)
+                except Exception:
+                    pass
+        page.wait_for_timeout(300)
         option_texts = [t.strip() for t in options.all_inner_texts()]
         for candidate in expanded:
             needle = candidate.split(' - ')[0].strip()
@@ -738,7 +783,7 @@ class Doc2UsLiveRunner:
                 # Some deployments update the DOM before URL matching settles.
                 page.wait_for_timeout(1500)
 
-        body_text = page.locator('body').inner_text(timeout=5000)
+        body_text = self._body_text_safe(page, timeout=5000)
         # Fill screening questionnaire required fields. Doc2Us keeps previous
         # patient clinical defaults, but the pharmacist referral fields are
         # mandatory for the record to be created. Tick questionnaire mode first

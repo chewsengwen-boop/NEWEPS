@@ -3,8 +3,8 @@ EPS Shared Web Automation
 What this is
 - A browser-based shared web app for colleagues.
 - Colleagues login using the same Doc2Us/EPS login style.
-- Pilot login enabled first:
-  qsbjc1@alpropharmacy.com / Alpro-123
+- Login accounts are configured through hosting environment variables.
+- Preferred multi-account variable: EPS_STAFF_ACCOUNTS_JSON
 - Upload Octopus Poison B/C Excel.
 - Enter pharmacist name and registration number.
 - App generates READY / REVIEW / OMIT EPS plan and downloadable Excel.

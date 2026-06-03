@@ -25,6 +25,30 @@ def html_page(title: str, body: str) -> HTMLResponse:
     return HTMLResponse(f'<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{escape(title)}</title><style>{CSS}</style></head><body>{body}</body></html>')
 
 
+def select_with_current(name: str, current: object, options: list[str]) -> str:
+    """Render a dropdown while preserving uncommon existing workbook values."""
+    value = str(current or '')
+    choices = list(options)
+    if value and value not in choices:
+        choices.insert(0, value)
+    rendered = ''.join(
+        f'<option value="{escape(opt)}" {"selected" if opt == value else ""}>{escape(opt)}</option>'
+        for opt in choices
+    )
+    return f'<select name="{escape(name)}">{rendered}</select>'
+
+
+FREQUENCY_OPTIONS = [
+    'Once daily', 'Every morning', 'Every night', 'Twice daily', 'Three times daily',
+    'Four times daily', 'Every other day', 'Once weekly', 'When necessary',
+    'Before meal', 'After meal', 'Every 4 hours', 'Every 6 hours', 'Every 8 hours',
+    'Every 12 hours',
+]
+DURATION_DAY_OPTIONS = ['3', '5', '7', '10', '14', '21', '28', '30', '60', '90']
+PRESCRIBED_AMOUNT_OPTIONS = ['1', '3', '5', '7', '10', '14', '15', '20', '21', '28', '30', '60', '90']
+PRESCRIBED_UNIT_OPTIONS = ['tablet(s)', 'capsule(s)', 'bottle(s)', 'tube(s)', 'box(es)', 'sachet(s)', 'ml', 'unit(s)']
+
+
 def require_login(request: Request):
     email = request.cookies.get('eps_email')
     if not email:
@@ -50,14 +74,18 @@ def render_review(job_id: str, request: Request, notice: str = '') -> HTMLRespon
             'selected' if status == 'OMIT' else '',
         )
         indication_select = render_indication_select(idx, str(r.get('doc2us_icd_code','')), str(r.get('doc2us_indication','')))
+        frequency_select = select_with_current(f'row_{idx}_frequency', r.get('frequency',''), FREQUENCY_OPTIONS)
+        duration_select = select_with_current(f'row_{idx}_duration_days', r.get('duration_days',''), DURATION_DAY_OPTIONS)
+        amount_select = select_with_current(f'row_{idx}_prescribed_amount', r.get('prescribed_amount',''), PRESCRIBED_AMOUNT_OPTIONS)
+        unit_select = select_with_current(f'row_{idx}_prescribed_unit', r.get('prescribed_unit',''), PRESCRIBED_UNIT_OPTIONS)
         rows.append(f'''<tr class="{status}">
 <td>{idx}<br>{status_select}</td>
 <td><textarea name="row_{idx}_skip_reason">{escape(str(r.get('skip_reason','')))}</textarea></td>
 <td><input name="row_{idx}_patient_name" value="{escape(str(r.get('patient_name','')))}"><span class="small">IC</span><input name="row_{idx}_patient_ic" value="{escape(str(r.get('patient_ic','')))}"><span class="small">Mobile</span><input name="row_{idx}_mobile" value="{escape(str(r.get('mobile','')))}"><span class="small">Email</span><input name="row_{idx}_email" value="{escape(str(r.get('email','')))}"></td>
 <td><span class="small">Medication item</span><input name="row_{idx}_item_name" value="{escape(str(r.get('item_name','')))}"><span class="small">Active ingredient(s)</span><input name="row_{idx}_active_ingredients" value="{escape(str(r.get('active_ingredients','')))}"><span class="small">Qty: {escape(str(r.get('qty','')))} | Class: {escape(str(r.get('medication_class','')))}</span></td>
 <td><input name="row_{idx}_indication" value="{escape(str(r.get('indication','')))}"><span class="small">AI pre-reviewed Doc2Us indication dropdown</span>{indication_select}<span class="small">Diagnosis search</span><input name="row_{idx}_diagnosis_search" value="{escape(str(r.get('diagnosis_search','')))}"></td>
-<td><span class="small">Route</span><input name="row_{idx}_route" value="{escape(str(r.get('route','')))}"><span class="small">Dose</span><input name="row_{idx}_dose" value="{escape(str(r.get('dose','')))}"><span class="small">Unit</span><input name="row_{idx}_dose_unit" value="{escape(str(r.get('dose_unit','')))}"><span class="small">Frequency</span><input name="row_{idx}_frequency" value="{escape(str(r.get('frequency','')))}"></td>
-<td><span class="small">Days</span><input name="row_{idx}_duration_days" value="{escape(str(r.get('duration_days','')))}"><span class="small">Amount</span><input name="row_{idx}_prescribed_amount" value="{escape(str(r.get('prescribed_amount','')))}"><span class="small">Unit</span><input name="row_{idx}_prescribed_unit" value="{escape(str(r.get('prescribed_unit','')))}"></td>
+<td><span class="small">Route</span><input name="row_{idx}_route" value="{escape(str(r.get('route','')))}"><span class="small">Dose</span><input name="row_{idx}_dose" value="{escape(str(r.get('dose','')))}"><span class="small">Unit</span><input name="row_{idx}_dose_unit" value="{escape(str(r.get('dose_unit','')))}"><span class="small">Frequency</span>{frequency_select}</td>
+<td><span class="small">Days</span>{duration_select}<span class="small">Amount</span>{amount_select}<span class="small">Unit</span>{unit_select}</td>
 <td><span class="small">BP</span><input name="row_{idx}_bp" value="{escape(str(r.get('bp','')))}"><span class="small">HR</span><input name="row_{idx}_hr" value="{escape(str(r.get('hr','')))}"><span class="small">Glucose</span><input name="row_{idx}_glucose" value="{escape(str(r.get('glucose','')))}"><span class="small">Next appt</span><input name="row_{idx}_next_appointment_date" value="{escape(str(r.get('next_appointment_date','')))}"></td>
 <td><textarea name="row_{idx}_drug_remark">{escape(str(r.get('drug_remark','')))}</textarea><span class="small">Screening remarks</span><textarea name="row_{idx}_screening_remarks">{escape(str(r.get('screening_remarks','')))}</textarea></td>
 </tr>''')

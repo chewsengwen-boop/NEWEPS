@@ -255,8 +255,10 @@ def get_staff_accounts() -> list[dict[str, str]]:
             pass
     if accounts:
         return accounts[:MAX_STAFF_ACCOUNTS]
-    app_email = os.environ.get('EPS_ALLOWED_EMAIL', 'qsbjc1@alpropharmacy.com').strip().lower()
-    app_password = os.environ.get('EPS_ALLOWED_PASSWORD', 'Alpro-123')
+    app_email = os.environ.get('EPS_ALLOWED_EMAIL', '').strip().lower()
+    app_password = os.environ.get('EPS_ALLOWED_PASSWORD', '')
+    if not app_email or not app_password:
+        return []
     return [{
         'id': app_email,
         'staff_label': os.environ.get('EPS_STAFF_LABEL', app_email),

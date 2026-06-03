@@ -23,12 +23,16 @@ from app.web_logic import (
 SAMPLE = '/mnt/c/Users/User/Downloads/OUTLET POISON B&C TRANSACTION NO_01-06-2026 (Web).xlsx'
 
 
-def test_authenticate_accepts_doc2us_trial_account():
-    assert authenticate('qsbjc1@alpropharmacy.com', 'Alpro-123') is True
+def test_authenticate_accepts_doc2us_trial_account(monkeypatch):
+    monkeypatch.setenv('EPS_ALLOWED_EMAIL', 'staff@example.com')
+    monkeypatch.setenv('EPS_ALLOWED_PASSWORD', 'test-pass')
+    assert authenticate('staff@example.com', 'test-pass') is True
 
 
-def test_authenticate_rejects_wrong_password():
-    assert authenticate('qsbjc1@alpropharmacy.com', 'wrong') is False
+def test_authenticate_rejects_wrong_password(monkeypatch):
+    monkeypatch.setenv('EPS_ALLOWED_EMAIL', 'staff@example.com')
+    monkeypatch.setenv('EPS_ALLOWED_PASSWORD', 'test-pass')
+    assert authenticate('staff@example.com', 'wrong') is False
 
 
 def test_make_job_id_is_safe_and_unique():
