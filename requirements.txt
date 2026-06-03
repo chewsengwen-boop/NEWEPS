@@ -1,32 +1,9 @@
-EPS package update - 03 Jun 2026
-
-Included fixes:
-1. EPS Plan Review + Edit dropdowns:
-   - Route
-   - Dosage unit
-   - Frequency
-   - Duration days
-   - Prescribed amount
-   - Prescribed unit
-
-2. No more unsafe medication catalogue assumption:
-   - Automation no longer clicks the first Doc2Us medication search result.
-   - It verifies the visible Doc2Us result against reviewed item name / active ingredient tokens.
-   - Example protected case: #PHARMANIAGA SIMVASTATIN 20MG 10S cannot be accepted as PHARMANIAGA VIRLESS unless the visible result contains matching SIMVASTATIN/product evidence.
-   - If no verified result is found, that row fails with an explicit message and screenshot instead of submitting the wrong medicine.
-
-3. 3x10 / pack-size review improvement:
-   - REVIEW/unmatched medicine rows no longer get a guessed 7-day default.
-   - If medication rule is missing, pharmacist must review/choose fields before setting READY.
-   - Raw item description remains visible/editable in EPS Plan Review + Edit and is carried to Doc2Us search.
-
-4. Mass import timeout hardening retained:
-   - safe body text fallback if locator('body').inner_text times out
-   - patient search uses domcontentloaded instead of relying only on networkidle
-   - diagnosis dropdown retries and saves diagnostic screenshot on failure
-
-Verification run:
-- Python compile passed for app/main.py, app/doc2us_live.py, app/web_logic.py, app/eps_bulk_core.py
-- pytest targeted suite passed: 6 passed
-- Raw data file tested: Newest Doc2us_03-06-2026 (Web) (1) (1).xlsx
-- GitHub-import ZIP shape verified: root contains Dockerfile, requirements.txt, app/main.py
+    fastapi
+    uvicorn[standard]
+    python-multipart
+    jinja2
+    pandas
+    openpyxl
+    playwright
+    httpx
+    pytest
