@@ -44,6 +44,8 @@ FREQUENCY_OPTIONS = [
     'Before meal', 'After meal', 'Every 4 hours', 'Every 6 hours', 'Every 8 hours',
     'Every 12 hours',
 ]
+ROUTE_OPTIONS = ['Oral', 'Topical', 'Ophthalmic', 'Otic', 'Nasal', 'Inhalation', 'Sublingual', 'Rectal', 'Vaginal']
+DOSE_UNIT_OPTIONS = ['tab(s)/cap(s)', 'tablet(s)', 'capsule(s)', 'ml', 'mg', 'mcg', 'g', 'drop(s)', 'puff(s)', 'sachet(s)', 'application(s)', 'unit(s)']
 DURATION_DAY_OPTIONS = ['3', '5', '7', '10', '14', '21', '28', '30', '60', '90']
 PRESCRIBED_AMOUNT_OPTIONS = ['1', '3', '5', '7', '10', '14', '15', '20', '21', '28', '30', '60', '90']
 PRESCRIBED_UNIT_OPTIONS = ['tablet(s)', 'capsule(s)', 'bottle(s)', 'tube(s)', 'box(es)', 'sachet(s)', 'ml', 'unit(s)']
@@ -74,6 +76,8 @@ def render_review(job_id: str, request: Request, notice: str = '') -> HTMLRespon
             'selected' if status == 'OMIT' else '',
         )
         indication_select = render_indication_select(idx, str(r.get('doc2us_icd_code','')), str(r.get('doc2us_indication','')))
+        route_select = select_with_current(f'row_{idx}_route', r.get('route',''), ROUTE_OPTIONS)
+        dose_unit_select = select_with_current(f'row_{idx}_dose_unit', r.get('dose_unit',''), DOSE_UNIT_OPTIONS)
         frequency_select = select_with_current(f'row_{idx}_frequency', r.get('frequency',''), FREQUENCY_OPTIONS)
         duration_select = select_with_current(f'row_{idx}_duration_days', r.get('duration_days',''), DURATION_DAY_OPTIONS)
         amount_select = select_with_current(f'row_{idx}_prescribed_amount', r.get('prescribed_amount',''), PRESCRIBED_AMOUNT_OPTIONS)
@@ -84,7 +88,7 @@ def render_review(job_id: str, request: Request, notice: str = '') -> HTMLRespon
 <td><input name="row_{idx}_patient_name" value="{escape(str(r.get('patient_name','')))}"><span class="small">IC</span><input name="row_{idx}_patient_ic" value="{escape(str(r.get('patient_ic','')))}"><span class="small">Mobile</span><input name="row_{idx}_mobile" value="{escape(str(r.get('mobile','')))}"><span class="small">Email</span><input name="row_{idx}_email" value="{escape(str(r.get('email','')))}"></td>
 <td><span class="small">Medication item</span><input name="row_{idx}_item_name" value="{escape(str(r.get('item_name','')))}"><span class="small">Active ingredient(s)</span><input name="row_{idx}_active_ingredients" value="{escape(str(r.get('active_ingredients','')))}"><span class="small">Qty: {escape(str(r.get('qty','')))} | Class: {escape(str(r.get('medication_class','')))}</span></td>
 <td><input name="row_{idx}_indication" value="{escape(str(r.get('indication','')))}"><span class="small">AI pre-reviewed Doc2Us indication dropdown</span>{indication_select}<span class="small">Diagnosis search</span><input name="row_{idx}_diagnosis_search" value="{escape(str(r.get('diagnosis_search','')))}"></td>
-<td><span class="small">Route</span><input name="row_{idx}_route" value="{escape(str(r.get('route','')))}"><span class="small">Dose</span><input name="row_{idx}_dose" value="{escape(str(r.get('dose','')))}"><span class="small">Unit</span><input name="row_{idx}_dose_unit" value="{escape(str(r.get('dose_unit','')))}"><span class="small">Frequency</span>{frequency_select}</td>
+<td><span class="small">Route</span>{route_select}<span class="small">Dose</span><input name="row_{idx}_dose" value="{escape(str(r.get('dose','')))}"><span class="small">Dosage unit</span>{dose_unit_select}<span class="small">Frequency</span>{frequency_select}</td>
 <td><span class="small">Days</span>{duration_select}<span class="small">Amount</span>{amount_select}<span class="small">Unit</span>{unit_select}</td>
 <td><span class="small">BP</span><input name="row_{idx}_bp" value="{escape(str(r.get('bp','')))}"><span class="small">HR</span><input name="row_{idx}_hr" value="{escape(str(r.get('hr','')))}"><span class="small">Glucose</span><input name="row_{idx}_glucose" value="{escape(str(r.get('glucose','')))}"><span class="small">Next appt</span><input name="row_{idx}_next_appointment_date" value="{escape(str(r.get('next_appointment_date','')))}"></td>
 <td><textarea name="row_{idx}_drug_remark">{escape(str(r.get('drug_remark','')))}</textarea><span class="small">Screening remarks</span><textarea name="row_{idx}_screening_remarks">{escape(str(r.get('screening_remarks','')))}</textarea></td>

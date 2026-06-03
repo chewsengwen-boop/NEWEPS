@@ -679,16 +679,25 @@ class Doc2UsLiveRunner:
             med_input.fill(term)
             page.wait_for_timeout(1200)
             results = modal.locator('.search-result')
-            if results.count():
-                preferred = results.filter(has_text=term).first
-                if preferred.count() and preferred.is_visible():
-                    preferred.click(force=True)
-                else:
-                    results.first.click(force=True)
-                selected = True
-                break
+            if not results.count():
+                continue
+            match = self._pick_verified_medication_result(results, row, term)
+            if match is None:
+                continue
+            match.click(force=True)
+            selected = True
+            break
         if not selected:
-            raise RuntimeError(f'Doc2Us medication search returned no selectable result for {medication_name}. Tried: {", ".join(candidates)}')
+            visible = []
+            try:
+                visible = [t.strip() for t in modal.locator('.search-result').all_inner_texts() if t.strip()]
+            except Exception:
+                pass
+            raise RuntimeError(
+                f'Doc2Us medication search returned no VERIFIED matching result for {medication_name}. '
+                f'Tried: {", ".join(candidates)}. Visible results: {visible[:10]}. '
+                'Pharmacist must edit Item/Active Ingredient or mark REVIEW; automation will not choose the first partial result.'
+            )
         modal.locator('.modal-title').click(force=True)
         page.wait_for_timeout(300)
         modal.locator('input[placeholder="e.g. 1"]').fill(_num_text(row.get('dose'), '1'))
@@ -707,6 +716,76 @@ class Doc2UsLiveRunner:
             confirm.get_by_role('button', name='OK').click(force=True)
         page.wait_for_timeout(2000)
 
+    def _pick_verified_medication_result(self, results, row: pd.Series, search_term: str):
+        """Return a result only when its visible text matches product/ingredient evidence.
+
+        Never click the first Doc2Us result for a broad manufacturer term. This
+        prevents #PHARMANIAGA SIMVASTATIN from becoming PHARMANIAGA VIRLESS.
+        """
+        expected_tokens = set(self._medication_identity_tokens(row))
+        term_tokens = set(self._significant_tokens(search_term))
+        active_tokens = set(self._significant_tokens(_clean(row.get('active_ingredients'))))
+        acceptable = expected_tokens | active_tokens | term_tokens
+        if not acceptable:
+            return None
+        try:
+            count = results.count()
+        except Exception:
+            return None
+        best = None
+        best_score = 0
+        for i in range(count):
+            loc = results.nth(i)
+            try:
+                if not loc.is_visible():
+                    continue
+                text = _clean(loc.inner_text(timeout=2000)).upper()
+            except Exception:
+                continue
+            result_tokens = set(self._significant_tokens(text))
+            # Require at least one non-manufacturer medication/ingredient token
+            # that came from the reviewed row, not only from a broad maker name.
+            overlap = result_tokens & acceptable
+            if not overlap:
+                continue
+            if self._only_broad_manufacturer_overlap(overlap):
+                continue
+            score = len(overlap)
+            if active_tokens and (result_tokens & active_tokens):
+                score += 5
+            if expected_tokens and (result_tokens & expected_tokens):
+                score += 4
+            if score > best_score:
+                best = loc
+                best_score = score
+        return best
+
+    def _only_broad_manufacturer_overlap(self, tokens: set[str]) -> bool:
+        broad = {'PHARMANIAGA', 'SANDOZ', 'APO', 'APOTHECARY', 'RX'}
+        return bool(tokens) and all(t in broad for t in tokens)
+
+    def _significant_tokens(self, text: str) -> list[str]:
+        stop = {
+            'RX', 'NEW', 'BOX', 'PACK', 'PACKING', 'TABLET', 'TABLETS', 'TAB', 'TABS',
+            'CAPSULE', 'CAPSULES', 'CAP', 'CAPS', 'FILM', 'COATED', 'PHARMANIAGA',
+            'SANDOZ', 'APO', 'CREAM', 'OINTMENT', 'SYRUP', 'SOLUTION'
+        }
+        tokens: list[str] = []
+        for token in re.findall(r'[A-Za-z][A-Za-z0-9-]{2,}', _clean(text).upper()):
+            token = token.strip('-')
+            if token in stop:
+                continue
+            if re.fullmatch(r'(?:\d+|X)?\d+(?:MG|MCG|G|ML|S)?(?:-NEW)?', token):
+                continue
+            if re.fullmatch(r'\d+X\d+S?(?:-NEW)?', token):
+                continue
+            if token not in tokens:
+                tokens.append(token)
+        return tokens
+
+    def _medication_identity_tokens(self, row: pd.Series) -> list[str]:
+        return self._significant_tokens(_clean(row.get('item_name')))
+
     def _medication_search_terms_for_row(self, row: pd.Series) -> list[str]:
         """Build Doc2Us medication catalogue search terms.
 
@@ -715,8 +794,20 @@ class Doc2UsLiveRunner:
         Description, e.g. EQOVEX -> ETORICOXIB. This still selects a real
         Doc2Us catalogue item instead of free-typing medicationId=null.
         """
-        terms = self._medication_search_terms(_clean(row.get('item_name')))
+        identity_terms = self._medication_search_terms(_clean(row.get('item_name')))
         active = _clean(row.get('active_ingredients'))
+        terms: list[str] = []
+        # Prefer specific product/ingredient evidence. Avoid standalone manufacturer
+        # searches (e.g. PHARMANIAGA) because Doc2Us may return unrelated brands.
+        cleaned_product = self._cleaned_product_search_phrase(_clean(row.get('item_name')))
+        if cleaned_product:
+            terms.append(cleaned_product)
+        for token in self._medication_identity_tokens(row):
+            if token not in terms:
+                terms.append(token)
+        for term in identity_terms:
+            if term not in terms and self._significant_tokens(term):
+                terms.append(term)
         for piece in re.split(r'[,;/+]|\bAND\b|\bWITH\b', active, flags=re.IGNORECASE):
             ingredient = re.sub(r'\s+', ' ', piece).strip().upper()
             if not ingredient:
@@ -726,7 +817,22 @@ class Doc2UsLiveRunner:
         active_clean = re.sub(r'\s+', ' ', active).strip().upper()
         if active_clean and active_clean not in terms:
             terms.append(active_clean)
+        for term in identity_terms:
+            if term not in terms and self._significant_tokens(term):
+                terms.append(term)
         return terms
+
+    def _cleaned_product_search_phrase(self, medication_name: str) -> str:
+        raw = _clean(medication_name)
+        cleaned = re.sub(r'\[[^\]]+\]', ' ', raw)
+        cleaned = re.sub(r'[*#]', ' ', cleaned)
+        cleaned = re.sub(r'\b\d+(?:MG|MCG|G|ML)\b', ' ', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\b\d+(?:X\d+)?S\b', ' ', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\b(?:NEW|BOX|PACKING|FILM|COATED|TABLETS?|CAPSULES?|TAB|CAP)\b', ' ', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'[^A-Za-z0-9 /-]+', ' ', cleaned)
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip().upper()
+        tokens = [t for t in cleaned.split() if t not in {'PHARMANIAGA', 'SANDOZ', 'APO', 'RX'}]
+        return ' '.join(tokens)
 
     def _medication_search_terms(self, medication_name: str) -> list[str]:
         raw = _clean(medication_name)

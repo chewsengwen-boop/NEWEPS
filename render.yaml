@@ -1,6 +1,17 @@
-__pycache__/
-*.pyc
-.pytest_cache/
-jobs/
-.env
-.venv/
+services:
+  - type: web
+    name: neweps
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: EPS_ALLOWED_EMAIL
+        sync: false
+      - key: EPS_ALLOWED_PASSWORD
+        sync: false
+      - key: DOC2US_EMAIL
+        sync: false
+      - key: DOC2US_PASSWORD
+        sync: false
+      - key: EPS_STAFF_ACCOUNTS_JSON
+        sync: false

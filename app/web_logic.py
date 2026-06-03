@@ -92,7 +92,12 @@ def apply_review_defaults(plan: pd.DataFrame) -> pd.DataFrame:
             plan.at[idx, 'doc2us_indication'] = desc
         if _blank(plan.at[idx, 'diagnosis_search']):
             plan.at[idx, 'diagnosis_search'] = desc or str(plan.at[idx, 'indication'] or '')
+        is_ready = str(plan.at[idx, 'status'] or '').strip().upper() == 'READY'
         for col, val in DEFAULT_REVIEW_VALUES.items():
+            if not is_ready and col in {'route', 'dose', 'dose_unit', 'frequency', 'duration_days', 'prescribed_unit'}:
+                # Do not guess medication instructions for REVIEW/unmatched rows.
+                # Pharmacist must choose these before changing the row to READY.
+                continue
             if col == 'duration_days':
                 if not _positive_number(plan.at[idx, col]):
                     plan.at[idx, col] = val
@@ -100,7 +105,12 @@ def apply_review_defaults(plan: pd.DataFrame) -> pd.DataFrame:
                 plan.at[idx, col] = val
         if not _positive_number(plan.at[idx, 'prescribed_amount']):
             qty = row.get('qty', '')
-            plan.at[idx, 'prescribed_amount'] = int(float(qty)) if _positive_number(qty) else 7
+            if _positive_number(qty):
+                plan.at[idx, 'prescribed_amount'] = int(float(qty))
+            elif is_ready:
+                plan.at[idx, 'prescribed_amount'] = 7
+            else:
+                plan.at[idx, 'prescribed_amount'] = ''
         if _blank(plan.at[idx, 'active_ingredients']):
             plan.at[idx, 'active_ingredients'] = str(row.get('item_name', '') or '')
     return plan

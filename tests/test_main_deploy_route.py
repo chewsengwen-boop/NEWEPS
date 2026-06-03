@@ -95,9 +95,12 @@ def test_review_page_uses_dropdowns_for_frequency_duration_and_amount(tmp_path, 
     response = client.get(f'/review/{job_id}')
 
     assert response.status_code == 200
-    assert '<select name="row_0_frequency">' in response.text
-    assert '<select name="row_0_duration_days">' in response.text
-    assert '<select name="row_0_prescribed_amount">' in response.text
-    assert '<select name="row_0_prescribed_unit">' in response.text
+    html = response.text
+    assert '<select name="row_0_route"' in html
+    assert '<select name="row_0_dose_unit"' in html
+    assert '<select name="row_0_frequency"' in html
+    assert '<select name="row_0_duration_days"' in html
+    assert '<select name="row_0_prescribed_amount"' in html
+
     assert '<option value="Once daily" selected>Once daily</option>' in response.text
     assert '<option value="30" selected>30</option>' in response.text
