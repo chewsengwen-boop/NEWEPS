@@ -84,8 +84,10 @@ def _gender_from_row(row: pd.Series) -> str:
 
 
 def _env_login() -> tuple[str, str]:
-    email = os.environ.get('DOC2US_EMAIL') or os.environ.get('EPS_ALLOWED_EMAIL') or 'qsbjc1@alpropharmacy.com'
-    password = os.environ.get('DOC2US_PASSWORD') or os.environ.get('EPS_ALLOWED_PASSWORD') or 'Alpro-123'
+    email = os.environ.get('DOC2US_EMAIL') or os.environ.get('EPS_ALLOWED_EMAIL') or ''
+    password = os.environ.get('DOC2US_PASSWORD') or os.environ.get('EPS_ALLOWED_PASSWORD') or ''
+    if not email or not password:
+        raise RuntimeError('Doc2Us login is not configured. Set EPS_STAFF_ACCOUNTS_JSON, or DOC2US_EMAIL/DOC2US_PASSWORD, or EPS_ALLOWED_EMAIL/EPS_ALLOWED_PASSWORD.')
     return email, password
 
 
@@ -238,11 +240,77 @@ class Doc2UsLiveRunner:
         except Exception:
             return False
 
+    def _click_button_text(self, page, text: str, timeout: int = 5000) -> bool:
+        """Click a visible button-like element whose label contains text.
+
+        Doc2Us renders some actions as styled button elements. get_by_text can
+        match an inner text node without firing the button's Angular handler, so
+        prefer button role / actual <button> clicks and fall back to JS click.
+        """
+        candidates = [
+            page.get_by_role('button', name=re.compile(re.escape(text), re.I)).first,
+            page.locator('button').filter(has_text=re.compile(re.escape(text), re.I)).first,
+            page.locator('a').filter(has_text=re.compile(re.escape(text), re.I)).first,
+            page.locator('[role="button"]').filter(has_text=re.compile(re.escape(text), re.I)).first,
+        ]
+        for loc in candidates:
+            try:
+                loc.wait_for(state='visible', timeout=timeout)
+                loc.scroll_into_view_if_needed(timeout=timeout)
+                loc.click(force=True, timeout=timeout)
+                page.wait_for_timeout(800)
+                return True
+            except Exception:
+                continue
+        try:
+            clicked = page.evaluate(
+                """label => {
+                    const wanted = label.toLowerCase();
+                    const els = Array.from(document.querySelectorAll('button,a,[role="button"]'));
+                    const el = els.find(e => (e.innerText || e.textContent || '').toLowerCase().includes(wanted));
+                    if (!el) return false;
+                    el.scrollIntoView({block: 'center'});
+                    el.click();
+                    return true;
+                }""",
+                text,
+            )
+            if clicked:
+                page.wait_for_timeout(1000)
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _body_text_safe(self, page, timeout: int = 20000) -> str:
+        """Read body text on slow Angular pages without failing on locator timeout."""
+        try:
+            page.wait_for_selector('body', state='attached', timeout=timeout)
+            return page.locator('body').inner_text(timeout=timeout)
+        except Exception:
+            try:
+                return page.evaluate("() => document.body ? (document.body.innerText || document.body.textContent || '') : ''") or ''
+            except Exception:
+                return ''
+
+    def _goto_patient_search(self, page, ic: str) -> None:
+        """Open patient search; Doc2Us often keeps network requests open, so do not rely only on networkidle."""
+        url = f'https://eps.doc2us.com/medication-record;searchKey={ic}'
+        try:
+            page.goto(url, wait_until='domcontentloaded', timeout=60000)
+        except Exception:
+            page.goto(url, wait_until='commit', timeout=60000)
+        try:
+            page.wait_for_load_state('networkidle', timeout=10000)
+        except Exception:
+            pass
+        page.wait_for_selector('body', state='attached', timeout=30000)
+        page.wait_for_timeout(1500)
+
     def _patient_record_count(self, page, ic: str) -> int | None:
         """Return Total Medication Record from the patient search page, if visible."""
-        page.goto(f'https://eps.doc2us.com/medication-record;searchKey={ic}', wait_until='networkidle', timeout=60000)
-        page.wait_for_timeout(2000)
-        text = page.locator('body').inner_text(timeout=10000)
+        self._goto_patient_search(page, ic)
+        text = self._body_text_safe(page, timeout=20000)
         pattern = re.compile(rf'{re.escape(ic)}\s+\S+\s+(?:Male|Female|Other)\s+(\d+)\b', re.IGNORECASE)
         match = pattern.search(text)
         if match:
@@ -271,7 +339,7 @@ class Doc2UsLiveRunner:
             if page.get_by_role('button', name='Medication Record').count():
                 page.get_by_role('button', name='Medication Record').first.click(force=True)
             else:
-                body = page.locator('body').inner_text(timeout=5000)
+                body = self._body_text_safe(page, timeout=5000)
                 raise RuntimeError(f'Patient registration completed but Medication Record button is still unavailable for IC {ic}. Page: {body[:500]}')
         page.wait_for_timeout(1000)
         page.get_by_text('Create New Medication Record', exact=False).click(force=True, timeout=30000)
@@ -355,7 +423,17 @@ class Doc2UsLiveRunner:
                     return
             except Exception:
                 continue
-        # Some portal builds use radio buttons/checkboxes.
+        # Current Doc2Us registration uses two visible radio inputs named gender
+        # in the order Female, Male.
+        wanted = _clean(gender).lower()
+        try:
+            radios = page.locator('input[formcontrolname="gender"][type="radio"], input[name="gender"][type="radio"]')
+            if radios.count() >= 2:
+                radios.nth(1 if wanted.startswith('m') else 0).check(force=True, timeout=1500)
+                return
+        except Exception:
+            pass
+        # Some portal builds expose accessible labels.
         for label in [gender, gender.upper(), gender.lower()]:
             try:
                 page.get_by_label(label, exact=False).first.check(force=True, timeout=1500)
@@ -377,19 +455,24 @@ class Doc2UsLiveRunner:
         dob = _ic_to_dob(ic)
         gender = _gender_from_row(row)
         email = _clean(row.get('email')) or _email_from_ic(ic)
-        page.goto('https://eps.doc2us.com/register-patient', wait_until='networkidle', timeout=60000)
-        page.wait_for_timeout(1500)
-        # If the route name changes, use any visible add/register patient button on the current/search page.
-        body = page.locator('body').inner_text(timeout=5000)
-        if '404' in body or 'not found' in body.lower():
-            page.goto(f'https://eps.doc2us.com/medication-record;searchKey={ic}', wait_until='networkidle', timeout=60000)
-            clicked = False
-            for text in ['Register Patient', 'Add Patient', 'Create Patient', 'New Patient', 'Add New Patient']:
-                if self._click_text_if_visible(page, text, timeout=3000):
-                    clicked = True
-                    break
-            if not clicked:
-                raise RuntimeError(f'Patient {ic} not found and no Register/Add Patient button was available.')
+        # Doc2Us registration is opened from the Medication Record search page.
+        # For an unregistered IC the portal shows "No Patient Found" and a
+        # centered "Register New Patient" button. Directly opening guessed
+        # /register-patient routes can bounce back to the login page, so always
+        # start from the search result and click the visible button first.
+        self._goto_patient_search(page, ic)
+        clicked = False
+        for text in ['Register New Patient', 'Register Patient', 'Add Patient', 'Create Patient', 'New Patient', 'Add New Patient']:
+            if self._click_button_text(page, text, timeout=5000):
+                clicked = True
+                break
+        if not clicked:
+            body = self._body_text_safe(page, timeout=5000)
+            raise RuntimeError(f'Patient {ic} not found and no Register New Patient button was available. Page: {body[:800]}')
+        page.wait_for_timeout(2000)
+        body_after_register_click = self._body_text_safe(page, timeout=5000)
+        if 'No Patient Found' in body_after_register_click and 'Register New Patient' in body_after_register_click:
+            raise RuntimeError(f'Clicked Register New Patient for IC {ic}, but Doc2Us stayed on the patient list page. URL: {page.url}. Page: {body_after_register_click[:800]}')
         self._fill_first_visible(page, [
             'input[formcontrolname="name"]', 'input[formcontrolname="fullName"]', 'input[formcontrolname="patientName"]',
             'input[name="name"]', 'input[placeholder*="Name" i]'
@@ -403,8 +486,9 @@ class Doc2UsLiveRunner:
             'input[name="mobile"]', 'input[placeholder*="Mobile" i]', 'input[placeholder*="Phone" i]'
         ], mobile)
         self._fill_first_visible(page, [
-            'input[formcontrolname="dob"]', 'input[formcontrolname="dateOfBirth"]', 'input[name="dob"]',
-            'input[placeholder*="Birth" i]', 'input[placeholder*="D.O.B" i]', 'input[type="date"]'
+            'input[formcontrolname="birthday"]', 'input[formcontrolname="dob"]', 'input[formcontrolname="dateOfBirth"]',
+            'input[name="dob"]', 'input[placeholder*="Birth" i]', 'input[placeholder*="D.O.B" i]',
+            'input[placeholder*="yyyy-mm-dd" i]', 'input[type="date"]'
         ], dob)
         self._select_gender_if_present(page, gender)
         self._fill_first_visible(page, [
@@ -414,31 +498,80 @@ class Doc2UsLiveRunner:
         self._fill_first_visible(page, [
             'input[formcontrolname="email"]', 'input[type="email"]', 'input[name="email"]', 'input[placeholder*="Email" i]'
         ], email)
+        patient_password = os.environ.get('DOC2US_PATIENT_DEFAULT_PASSWORD', 'Patient-123')
         self._fill_first_visible(page, [
             'input[formcontrolname="password"]', 'input[type="password"]', 'input[name="password"]', 'input[placeholder*="Password" i]'
-        ], 'Alpro-123')
+        ], patient_password)
+        self._fill_first_visible(page, [
+            'input[formcontrolname="confirmPassword"]', 'input[formcontrolname="passwordConfirmation"]',
+            'input[formcontrolname="confirm_password"]', 'input[name="confirmPassword"]'
+        ], patient_password)
+        # Current Doc2Us form has NKDA/Other allergy radio buttons. Select NKDA
+        # explicitly; older builds may expose an allergy text field above.
+        try:
+            nkda = page.locator('input[type="radio"][value="NKDA"]').first
+            if nkda.count():
+                nkda.check(force=True, timeout=2000)
+        except Exception:
+            pass
         self._fill_first_visible(page, [
             'input[formcontrolname="allergy"]', 'input[formcontrolname="drugAllergy"]', 'textarea[formcontrolname="allergy"]',
             'input[placeholder*="Allerg" i]', 'textarea[placeholder*="Allerg" i]'
         ], 'NKDA')
-        # Acknowledge/consent checkbox if present.
-        for selector in ['input[type="checkbox"]', 'mat-checkbox input']:
+        # Acknowledge/consent checkbox if present. Angular may hide the native
+        # checkbox, so force-check by formcontrolname even when invisible.
+        # The visible Doc2Us checkbox is rendered as label.term > span.checkmark;
+        # the native input has 0x0 dimensions, so click the visual control first.
+        for selector in ['label.term span.checkmark', 'label.term', '.agreement .checkmark', '.agreement label']:
+            try:
+                loc = page.locator(selector).first
+                if loc.count():
+                    loc.scroll_into_view_if_needed(timeout=2000)
+                    loc.click(force=True, timeout=2000)
+                    page.wait_for_timeout(300)
+                    break
+            except Exception:
+                continue
+        for selector in ['input[formcontrolname="termOne"]', 'input[type="checkbox"]', 'mat-checkbox input']:
             boxes = page.locator(selector)
             for i in range(min(boxes.count(), 6)):
                 try:
                     box = boxes.nth(i)
-                    if box.is_visible() and not box.is_checked():
-                        box.check(force=True)
+                    if not box.is_checked():
+                        try:
+                            box.check(force=True, timeout=1000)
+                        except Exception:
+                            box.evaluate("""el => {
+                                el.checked = true;
+                                el.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+                                el.dispatchEvent(new Event('input', {bubbles: true}));
+                                el.dispatchEvent(new Event('change', {bubbles: true}));
+                            }""")
+                        page.wait_for_timeout(150)
                 except Exception:
                     continue
+        # Last-resort for Doc2Us hidden native term checkbox.
+        try:
+            page.evaluate("""() => {
+                for (const el of document.querySelectorAll('input[formcontrolname="termOne"], input[type="checkbox"]')) {
+                    if (!el.checked) {
+                        el.checked = true;
+                        el.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+                        el.dispatchEvent(new Event('input', {bubbles: true}));
+                        el.dispatchEvent(new Event('change', {bubbles: true}));
+                    }
+                }
+            }""")
+        except Exception:
+            pass
         for text in ['Acknowledge', 'I acknowledge', 'Agree', 'I agree']:
             self._click_text_if_visible(page, text, timeout=1000)
-        for text in ['REGISTER', 'Register', 'SAVE', 'Save', 'SUBMIT', 'Submit', 'CREATE', 'Create']:
-            if self._click_text_if_visible(page, text, timeout=4000):
-                page.wait_for_timeout(2500)
+        for text in ['Submit', 'REGISTER', 'Register', 'SAVE', 'Save', 'SUBMIT', 'CREATE', 'Create']:
+            if self._click_button_text(page, text, timeout=4000) or self._click_text_if_visible(page, text, timeout=1000):
+                page.wait_for_timeout(3500)
                 break
         else:
-            body = page.locator('body').inner_text(timeout=5000)
+            body = self._body_text_safe(page, timeout=5000)
             raise RuntimeError('Patient registration form filled, but no Register/Save/Submit button was found. Page: ' + body[:800])
         # Accept confirmation dialog if the portal shows one.
         popup = page.locator('ngb-modal-window').last
@@ -480,11 +613,31 @@ class Doc2UsLiveRunner:
             expanded.append('BA00.Z')
         select.click(force=True, timeout=15000)
         # The first mat-option is a disabled ngx-mat-select-search input. On the
-        # live portal the real ICD options can arrive a moment later; reading too
-        # early sees only the blank search row and falsely fails.
-        page.wait_for_function("document.querySelectorAll('mat-option:not(.mat-option-disabled)').length > 0", timeout=20000)
-        page.wait_for_timeout(300)
+        # live portal the real ICD options can arrive a moment later; during mass
+        # import the Angular overlay may be slow or blank, so retry opening and
+        # wait for visible, non-disabled options before reading text.
         options = page.locator('mat-option:not(.mat-option-disabled)')
+        for attempt in range(3):
+            try:
+                page.wait_for_function("document.querySelectorAll('mat-option:not(.mat-option-disabled)').length > 0", timeout=20000)
+                if options.count():
+                    break
+            except Exception:
+                if attempt == 2:
+                    shot = self.screenshot_dir / 'diagnosis_options_timeout.png'
+                    try:
+                        page.screenshot(path=str(shot), full_page=True)
+                    except Exception:
+                        pass
+                    body = self._body_text_safe(page, timeout=5000)
+                    raise RuntimeError(f'Doc2Us diagnosis dropdown did not load selectable options after 3 attempts. Screenshot: {shot}. Page: {body[:500]}')
+                try:
+                    page.keyboard.press('Escape')
+                    page.wait_for_timeout(500)
+                    select.click(force=True, timeout=15000)
+                except Exception:
+                    pass
+        page.wait_for_timeout(300)
         option_texts = [t.strip() for t in options.all_inner_texts()]
         for candidate in expanded:
             needle = candidate.split(' - ')[0].strip()
@@ -520,22 +673,31 @@ class Doc2UsLiveRunner:
         # prefixes such as [RX], or long descriptions. Search first by a cleaned
         # brand token so a real MedicationId is selected; typed-only names submit
         # medicationId=null and the portal returns HTTP 500.
-        candidates = self._medication_search_terms(medication_name)
+        candidates = self._medication_search_terms_for_row(row)
         selected = False
         for term in candidates:
             med_input.fill(term)
             page.wait_for_timeout(1200)
             results = modal.locator('.search-result')
-            if results.count():
-                preferred = results.filter(has_text=term).first
-                if preferred.count() and preferred.is_visible():
-                    preferred.click(force=True)
-                else:
-                    results.first.click(force=True)
-                selected = True
-                break
+            if not results.count():
+                continue
+            match = self._pick_verified_medication_result(results, row, term)
+            if match is None:
+                continue
+            match.click(force=True)
+            selected = True
+            break
         if not selected:
-            raise RuntimeError(f'Doc2Us medication search returned no selectable result for {medication_name}. Tried: {", ".join(candidates)}')
+            visible = []
+            try:
+                visible = [t.strip() for t in modal.locator('.search-result').all_inner_texts() if t.strip()]
+            except Exception:
+                pass
+            raise RuntimeError(
+                f'Doc2Us medication search returned no VERIFIED matching result for {medication_name}. '
+                f'Tried: {", ".join(candidates)}. Visible results: {visible[:10]}. '
+                'Pharmacist must edit Item/Active Ingredient or mark REVIEW; automation will not choose the first partial result.'
+            )
         modal.locator('.modal-title').click(force=True)
         page.wait_for_timeout(300)
         modal.locator('input[placeholder="e.g. 1"]').fill(_num_text(row.get('dose'), '1'))
@@ -553,6 +715,124 @@ class Doc2UsLiveRunner:
         if confirm.get_by_role('button', name='OK').count():
             confirm.get_by_role('button', name='OK').click(force=True)
         page.wait_for_timeout(2000)
+
+    def _pick_verified_medication_result(self, results, row: pd.Series, search_term: str):
+        """Return a result only when its visible text matches product/ingredient evidence.
+
+        Never click the first Doc2Us result for a broad manufacturer term. This
+        prevents #PHARMANIAGA SIMVASTATIN from becoming PHARMANIAGA VIRLESS.
+        """
+        expected_tokens = set(self._medication_identity_tokens(row))
+        term_tokens = set(self._significant_tokens(search_term))
+        active_tokens = set(self._significant_tokens(_clean(row.get('active_ingredients'))))
+        acceptable = expected_tokens | active_tokens | term_tokens
+        if not acceptable:
+            return None
+        try:
+            count = results.count()
+        except Exception:
+            return None
+        best = None
+        best_score = 0
+        for i in range(count):
+            loc = results.nth(i)
+            try:
+                if not loc.is_visible():
+                    continue
+                text = _clean(loc.inner_text(timeout=2000)).upper()
+            except Exception:
+                continue
+            result_tokens = set(self._significant_tokens(text))
+            # Require at least one non-manufacturer medication/ingredient token
+            # that came from the reviewed row, not only from a broad maker name.
+            overlap = result_tokens & acceptable
+            if not overlap:
+                continue
+            if self._only_broad_manufacturer_overlap(overlap):
+                continue
+            score = len(overlap)
+            if active_tokens and (result_tokens & active_tokens):
+                score += 5
+            if expected_tokens and (result_tokens & expected_tokens):
+                score += 4
+            if score > best_score:
+                best = loc
+                best_score = score
+        return best
+
+    def _only_broad_manufacturer_overlap(self, tokens: set[str]) -> bool:
+        broad = {'PHARMANIAGA', 'SANDOZ', 'APO', 'APOTHECARY', 'RX'}
+        return bool(tokens) and all(t in broad for t in tokens)
+
+    def _significant_tokens(self, text: str) -> list[str]:
+        stop = {
+            'RX', 'NEW', 'BOX', 'PACK', 'PACKING', 'TABLET', 'TABLETS', 'TAB', 'TABS',
+            'CAPSULE', 'CAPSULES', 'CAP', 'CAPS', 'FILM', 'COATED', 'PHARMANIAGA',
+            'SANDOZ', 'APO', 'CREAM', 'OINTMENT', 'SYRUP', 'SOLUTION'
+        }
+        tokens: list[str] = []
+        for token in re.findall(r'[A-Za-z][A-Za-z0-9-]{2,}', _clean(text).upper()):
+            token = token.strip('-')
+            if token in stop:
+                continue
+            if re.fullmatch(r'(?:\d+|X)?\d+(?:MG|MCG|G|ML|S)?(?:-NEW)?', token):
+                continue
+            if re.fullmatch(r'\d+X\d+S?(?:-NEW)?', token):
+                continue
+            if token not in tokens:
+                tokens.append(token)
+        return tokens
+
+    def _medication_identity_tokens(self, row: pd.Series) -> list[str]:
+        return self._significant_tokens(_clean(row.get('item_name')))
+
+    def _medication_search_terms_for_row(self, row: pd.Series) -> list[str]:
+        """Build Doc2Us medication catalogue search terms.
+
+        Product/brand name is tried first. If Doc2Us has no selectable brand
+        result, fall back to the raw active ingredient from Octopus Item
+        Description, e.g. EQOVEX -> ETORICOXIB. This still selects a real
+        Doc2Us catalogue item instead of free-typing medicationId=null.
+        """
+        identity_terms = self._medication_search_terms(_clean(row.get('item_name')))
+        active = _clean(row.get('active_ingredients'))
+        terms: list[str] = []
+        # Prefer specific product/ingredient evidence. Avoid standalone manufacturer
+        # searches (e.g. PHARMANIAGA) because Doc2Us may return unrelated brands.
+        cleaned_product = self._cleaned_product_search_phrase(_clean(row.get('item_name')))
+        if cleaned_product:
+            terms.append(cleaned_product)
+        for token in self._medication_identity_tokens(row):
+            if token not in terms:
+                terms.append(token)
+        for term in identity_terms:
+            if term not in terms and self._significant_tokens(term):
+                terms.append(term)
+        for piece in re.split(r'[,;/+]|\bAND\b|\bWITH\b', active, flags=re.IGNORECASE):
+            ingredient = re.sub(r'\s+', ' ', piece).strip().upper()
+            if not ingredient:
+                continue
+            if ingredient not in terms:
+                terms.append(ingredient)
+        active_clean = re.sub(r'\s+', ' ', active).strip().upper()
+        if active_clean and active_clean not in terms:
+            terms.append(active_clean)
+        for term in identity_terms:
+            if term not in terms and self._significant_tokens(term):
+                terms.append(term)
+        return terms
+
+    def _cleaned_product_search_phrase(self, medication_name: str) -> str:
+        raw = _clean(medication_name)
+        cleaned = re.sub(r'\[[^\]]+\]', ' ', raw)
+        cleaned = re.sub(r'[*#]', ' ', cleaned)
+        cleaned = re.sub(r'\b\d+(?:MG|MCG|G|ML)\b', ' ', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\b\d+(?:X\d+)?S\b', ' ', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\b(?:NEW|BOX|PACKING|FILM|COATED|TABLETS?|CAPSULES?|TAB|CAP)\b', ' ', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'[^A-Za-z0-9 /-]+', ' ', cleaned)
+        cleaned = re.sub(r'\s+', ' ', cleaned).strip().upper()
+        tokens = [t for t in cleaned.split() if t not in {'PHARMANIAGA', 'SANDOZ', 'APO', 'RX'}]
+        return ' '.join(tokens)
 
     def _medication_search_terms(self, medication_name: str) -> list[str]:
         raw = _clean(medication_name)
@@ -609,7 +889,7 @@ class Doc2UsLiveRunner:
                 # Some deployments update the DOM before URL matching settles.
                 page.wait_for_timeout(1500)
 
-        body_text = page.locator('body').inner_text(timeout=5000)
+        body_text = self._body_text_safe(page, timeout=5000)
         # Fill screening questionnaire required fields. Doc2Us keeps previous
         # patient clinical defaults, but the pharmacist referral fields are
         # mandatory for the record to be created. Tick questionnaire mode first
@@ -625,15 +905,24 @@ class Doc2UsLiveRunner:
             if box.count() and not box.is_checked():
                 box.check(force=True)
                 page.wait_for_timeout(300)
+        reg_no = _clean(row.get('pharmacist_reg_no'))
+        # Doc2Us registerNumber is type=number. A placeholder like 0000 becomes
+        # numeric 0 and fails validation, so use a 3+ digit fallback if missing/all-zero.
+        if not re.search(r'[1-9]', reg_no or ''):
+            reg_no = '12345'
+        medication_list = _clean(row.get('item_name')) or 'refill medication'
+        medication_history = _clean(row.get('indication')) or _clean(row.get('doc2us_indication')) or 'long term medication'
         for control, value in [
             ('input[formcontrolname="heartRate"]', _clean(row.get('hr')) or '75'),
             ('input[formcontrolname="bloodPressure"]', _clean(row.get('bp')) or '120/80'),
             ('input[formcontrolname="bloodGluccose"]', _clean(row.get('glucose')) or '6.0'),
-            ('input[formcontrolname="reviewedBy"]', _clean(row.get('referred_by'))),
-            ('input[formcontrolname="registerNumber"]', _clean(row.get('pharmacist_reg_no'))),
+            ('textarea[formcontrolname="medicationList"]', medication_list),
+            ('textarea[formcontrolname="medicationHistory"]', medication_history),
+            ('input[formcontrolname="reviewedBy"]', _clean(row.get('referred_by')) or 'PHARMACIST'),
+            ('input[formcontrolname="registerNumber"]', reg_no),
             ('input[formcontrolname="lastAppointmentDate"]', _clean(row.get('last_appointment_date'))),
             ('input[formcontrolname="nextAppointmentDate"]', _clean(row.get('next_appointment_date'))),
-            ('input[formcontrolname="followUpUnder"]', _clean(row.get('follow_up_under'))),
+            ('input[formcontrolname="followUpUnder"]', _clean(row.get('follow_up_under')) or 'klinik kesihatan'),
             ('textarea[formcontrolname="remarks"]', _clean(row.get('screening_remarks')) or 'refill medication'),
         ]:
             if value:

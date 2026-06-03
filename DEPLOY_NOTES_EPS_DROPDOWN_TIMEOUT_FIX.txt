@@ -1,27 +1,21 @@
-EPS package update
+import pandas as pd
 
-Included changes:
-1. Review/Edit page dropdowns added for:
-   - Frequency
-   - Duration days
-   - Prescribed amount
-   - Prescribed unit
-2. Mass import timeout hardening:
-   - safer patient-search navigation
-   - safe body-text fallback when locator("body").inner_text times out
-   - diagnosis dropdown retry logic
-   - diagnostic screenshot diagnosis_options_timeout.png when ICD options fail to load
-3. Multi-account login support remains through EPS_STAFF_ACCOUNTS_JSON.
+from app.doc2us_live import _email_from_ic, _gender_from_row, _ic_to_dob, _normalise_phone
+from app.web_logic import DOC2US_DEPLOY_COLUMNS
 
-Deployment environment variables:
-- Preferred multi-account key: EPS_STAFF_ACCOUNTS_JSON
-- Single-account fallback keys, if not using multi-account:
-  DOC2US_EMAIL / DOC2US_PASSWORD
-  or EPS_ALLOWED_EMAIL / EPS_ALLOWED_PASSWORD
 
-Important:
-No live account passwords are stored in this package. Add passwords only in the hosting platform environment variables, then restart/redeploy the app.
+def test_patient_registration_helpers_derive_ic_dob_email_and_phone():
+    assert _ic_to_dob("930801136321") == "1993-08-01"
+    assert _email_from_ic("930801-13-6321") == "930801136321@doc2us.com"
+    assert _normalise_phone("012-345 6789") == "60123456789"
 
-Validation run locally:
-- python3 -m py_compile app/main.py app/doc2us_live.py app/web_logic.py
-- PYTHONPATH=. pytest -q tests/test_main_deploy_route.py
+
+def test_patient_registration_gender_uses_raw_gender_then_ic_fallback():
+    assert _gender_from_row(pd.Series({"gender": "Female", "patient_ic": "930801136321"})) == "Female"
+    assert _gender_from_row(pd.Series({"gender": "", "patient_ic": "930801136321"})) == "Male"
+    assert _gender_from_row(pd.Series({"gender": "", "patient_ic": "930801136322"})) == "Female"
+
+
+def test_doc2us_deploy_queue_includes_gender_for_registration():
+    assert "gender" in DOC2US_DEPLOY_COLUMNS
+    assert DOC2US_DEPLOY_COLUMNS.index("gender") < DOC2US_DEPLOY_COLUMNS.index("mobile")

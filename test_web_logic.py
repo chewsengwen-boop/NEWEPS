@@ -1,37 +1,47 @@
-icd_code,icd_description
-BA00.Z,"Essential hypertension, unspecified"
-5A11,"Type 2 diabetes mellitus"
-5A10,"Type 1 diabetes mellitus"
-5C80.0Z,"Hypercholesterolaemia, unspecified"
-BA6Z,"Ischaemic heart diseases, unspecified"
-BD10,"Congestive heart failure"
-BC9Z,"Cardiac arrhythmia, unspecified"
-8B11.5Z,"Cerebral ischaemic stroke, unspecified"
-GB6Z,"Kidney failure, unspecified"
-5A0Z,"Disorders of the thyroid gland or thyroid hormones system, unspecified"
-FA25,"Gout"
-9C61.Z,"Glaucoma, unspecified"
-BD71,"Deep vein thrombosis"
-1E51.0Z,"Chronic hepatitis B, unspecified"
-1E51.1,"Chronic hepatitis C"
-QC90.6,"Contact with or exposure to human immunodeficiency virus"
-MG3Z,"Pain, unspecified"
-8E43.0Z,"Neuropathic pain, unspecified"
-ME84.2Z,"Low back pain, unspecified"
-8A6Z,"Epilepsy or seizures, unspecified"
-GA90,"Hyperplasia of prostate"
-1F28.Z,"Dermatophytosis, unspecified"
-EE12.1,"Onychomycosis"
-ED80.Z,"Acne, unspecified"
-MD90,"Nausea or vomiting"
-MD92,"Dyspepsia"
-DA42.Z,"Gastritis, unspecified"
-DA22.Z,"Gastro-oesophageal reflux disease, unspecified"
-1A40.Z,"Infectious gastroenteritis or colitis without specification of infectious agent"
-FB32.5,"Muscle strain or sprain"
-FB56.2,"Myalgia"
-8A80.Z,"Migraine, unspecified"
-8A81.Z,"Tension-type headache, unspecified"
-CA23,"Asthma"
-4A8Z,"Allergic or hypersensitivity conditions of unspecified type"
-CA08.0Z,"Allergic rhinitis, unspecified"
+#!/usr/bin/env python3
+"""Doc2Us EPS browser automation skeleton for the deploy queue.
+
+Safety design:
+- Default is dry-run. It logs planned actions but does not click final live submit/request buttons.
+- Patient registration and prescription request steps are represented as explicit confirmation gates.
+- Use this after pharmacist review of DOC2US_READY_UPLOAD. Doctor approval remains required inside Doc2Us.
+
+Usage:
+  python scripts/doc2us_dry_run_import.py jobs/<job_id>/*_DOC2US_READY_QUEUE.xlsx --email staff@alpropharmacy.com
+
+Set DOC2US_PASSWORD in the environment or pass --password for local testing.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import sys
+
+import pandas as pd
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from app.web_logic import build_doc2us_automation_manifest  # noqa: E402
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument('queue_xlsx', help='Doc2Us READY queue workbook')
+    ap.add_argument('--email', default=os.environ.get('DOC2US_EMAIL', ''))
+    ap.add_argument('--password', default=os.environ.get('DOC2US_PASSWORD', ''))
+    ap.add_argument('--dry-run', action='store_true', default=True)
+    args = ap.parse_args()
+
+    manifest = build_doc2us_automation_manifest(args.queue_xlsx, dry_run=True)
+    manifest['login_email'] = args.email
+    manifest['password_supplied'] = bool(args.password)
+    print(json.dumps(manifest, indent=2, ensure_ascii=False))
+    print('\nNEXT IMPLEMENTATION STEP: map these manifest actions to exact Doc2Us selectors in Playwright.')
+    print('Final request/submit buttons must remain blocked behind a pharmacist confirmation gate.')
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

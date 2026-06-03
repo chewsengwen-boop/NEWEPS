@@ -10,9 +10,18 @@ services:
   routes:
   - path: /
   envs:
+  - key: EPS_STAFF_ACCOUNTS_JSON
+    scope: RUN_TIME
+    type: SECRET
   - key: EPS_ALLOWED_EMAIL
-    value: qsbjc1@alpropharmacy.com
     scope: RUN_TIME
+    type: SECRET
   - key: EPS_ALLOWED_PASSWORD
-    value: Alpro-123
     scope: RUN_TIME
+    type: SECRET
+  - key: DOC2US_EMAIL
+    scope: RUN_TIME
+    type: SECRET
+  - key: DOC2US_PASSWORD
+    scope: RUN_TIME
+    type: SECRET
