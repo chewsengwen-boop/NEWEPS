@@ -3,27 +3,28 @@ import pandas as pd
 from app.doc2us_live import Doc2UsLiveRunner
 
 
-def test_plain_simvastatin_rejects_vytorin_combination_result(tmp_path):
-    runner = Doc2UsLiveRunner(tmp_path)
+def test_medication_search_terms_fall_back_to_active_ingredient_for_unknown_brand():
+    runner = Doc2UsLiveRunner('/tmp/doc2us-test-screenshots')
     row = pd.Series({
-        'item_name': '#PHARMANIAGA SIMVASTATIN 20MG 10S',
-        'active_ingredients': 'SIMVASTATIN',
+        'item_name': 'EQOVEX 90MG 10S',
+        'active_ingredients': 'ETORICOXIB',
     })
-    assert runner._active_ingredients_are_compatible(row, 'PHARMANIAGA SIMVASTATIN 20MG TABLET')
-    assert not runner._active_ingredients_are_compatible(row, 'Ezetimibe 10mg & Simvastatin 10mg Tablet (VYTORIN 10/10)')
-    assert not runner._strengths_are_compatible(row, 'Ezetimibe 10mg & Simvastatin 10mg Tablet (VYTORIN 10/10)')
+
+    terms = runner._medication_search_terms_for_row(row)
+
+    assert terms[:2] == ['EQOVEX', 'EQOVEX 90MG 10S']
+    assert 'ETORICOXIB' in terms
+    assert terms.index('ETORICOXIB') > terms.index('EQOVEX 90MG 10S')
 
 
-def test_registration_form_text_is_treated_as_already_open(tmp_path):
-    runner = Doc2UsLiveRunner(tmp_path)
+def test_medication_search_terms_split_combination_active_ingredients():
+    runner = Doc2UsLiveRunner('/tmp/doc2us-test-screenshots')
+    row = pd.Series({
+        'item_name': 'NORGESIC 35/450MG 12S (NEW) BOX PACKING',
+        'active_ingredients': 'ORPHENADRINE, PARACETAMOL',
+    })
 
-    class FakePage:
-        def locator(self, selector):
-            class Loc:
-                def count(self): return 0
-            return Loc()
+    terms = runner._medication_search_terms_for_row(row)
 
-    page = FakePage()
-    page_text = 'Register New Patient Kindly Fill In All The Details Below *Email *Full Name (As per IC/Passport) *IC Number/Passport Number Enter to search *D.O.B *Contact No *Password Submit'
-    runner._body_text_safe = lambda page, timeout=3000: page_text
-    assert runner._registration_form_visible(page)
+    assert 'ORPHENADRINE' in terms
+    assert 'PARACETAMOL' in terms

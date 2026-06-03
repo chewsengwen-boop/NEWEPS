@@ -1,47 +1,18 @@
-#!/usr/bin/env python3
-"""Doc2Us EPS browser automation skeleton for the deploy queue.
-
-Safety design:
-- Default is dry-run. It logs planned actions but does not click final live submit/request buttons.
-- Patient registration and prescription request steps are represented as explicit confirmation gates.
-- Use this after pharmacist review of DOC2US_READY_UPLOAD. Doctor approval remains required inside Doc2Us.
-
-Usage:
-  python scripts/doc2us_dry_run_import.py jobs/<job_id>/*_DOC2US_READY_QUEUE.xlsx --email staff@alpropharmacy.com
-
-Set DOC2US_PASSWORD in the environment or pass --password for local testing.
-"""
-from __future__ import annotations
-
-import argparse
-import json
-import os
-from pathlib import Path
-import sys
-
-import pandas as pd
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-from app.web_logic import build_doc2us_automation_manifest  # noqa: E402
-
-
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument('queue_xlsx', help='Doc2Us READY queue workbook')
-    ap.add_argument('--email', default=os.environ.get('DOC2US_EMAIL', ''))
-    ap.add_argument('--password', default=os.environ.get('DOC2US_PASSWORD', ''))
-    ap.add_argument('--dry-run', action='store_true', default=True)
-    args = ap.parse_args()
-
-    manifest = build_doc2us_automation_manifest(args.queue_xlsx, dry_run=True)
-    manifest['login_email'] = args.email
-    manifest['password_supplied'] = bool(args.password)
-    print(json.dumps(manifest, indent=2, ensure_ascii=False))
-    print('\nNEXT IMPLEMENTATION STEP: map these manifest actions to exact Doc2Us selectors in Playwright.')
-    print('Final request/submit buttons must remain blocked behind a pharmacist confirmation gate.')
-    return 0
-
-
-if __name__ == '__main__':
-    raise SystemExit(main())
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Review EPS Plan</title><link rel="stylesheet" href="/static/style.css"></head>
+<body><main class="wide">
+<h1>EPS Plan Review</h1>
+<p>Logged in as {{ email }}</p>
+<div class="summary">
+{% for k,v in job.counts.items() %}<span class="pill {{k}}">{{k}}: {{v}}</span>{% endfor %}
+</div>
+<p><a class="button" href="/download/{{ job.job_id }}">Download Excel Review Workbook</a> <a href="/upload">Upload another file</a></p>
+<table>
+<thead><tr><th>Status</th><th>Reason</th><th>Patient</th><th>IC</th><th>Item</th><th>Qty</th><th>Class</th><th>Indication</th><th>Freq</th><th>Days</th><th>Amount</th><th>Next Appt</th></tr></thead>
+<tbody>
+{% for r in job.preview %}
+<tr class="{{ r.status }}"><td>{{ r.status }}</td><td>{{ r.skip_reason }}</td><td>{{ r.patient_name }}</td><td>{{ r.patient_ic }}</td><td>{{ r.item_name }}</td><td>{{ r.qty }}</td><td>{{ r.medication_class }}</td><td>{{ r.indication }}</td><td>{{ r.frequency }}</td><td>{{ r.duration_days }}</td><td>{{ r.prescribed_amount }}</td><td>{{ r.next_appointment_date }}</td></tr>
+{% endfor %}
+</tbody></table>
+<p class="note">READY rows can proceed after pharmacist review. REVIEW rows require checking. OMIT rows should not be submitted via EPS.</p>
+</main></body></html>

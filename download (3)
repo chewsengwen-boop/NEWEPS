@@ -1,21 +1,47 @@
+#!/usr/bin/env python3
+"""Doc2Us EPS browser automation skeleton for the deploy queue.
+
+Safety design:
+- Default is dry-run. It logs planned actions but does not click final live submit/request buttons.
+- Patient registration and prescription request steps are represented as explicit confirmation gates.
+- Use this after pharmacist review of DOC2US_READY_UPLOAD. Doctor approval remains required inside Doc2Us.
+
+Usage:
+  python scripts/doc2us_dry_run_import.py jobs/<job_id>/*_DOC2US_READY_QUEUE.xlsx --email staff@alpropharmacy.com
+
+Set DOC2US_PASSWORD in the environment or pass --password for local testing.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import sys
+
 import pandas as pd
 
-from app.doc2us_live import _email_from_ic, _gender_from_row, _ic_to_dob, _normalise_phone
-from app.web_logic import DOC2US_DEPLOY_COLUMNS
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from app.web_logic import build_doc2us_automation_manifest  # noqa: E402
 
 
-def test_patient_registration_helpers_derive_ic_dob_email_and_phone():
-    assert _ic_to_dob("930801136321") == "1993-08-01"
-    assert _email_from_ic("930801-13-6321") == "930801136321@doc2us.com"
-    assert _normalise_phone("012-345 6789") == "60123456789"
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument('queue_xlsx', help='Doc2Us READY queue workbook')
+    ap.add_argument('--email', default=os.environ.get('DOC2US_EMAIL', ''))
+    ap.add_argument('--password', default=os.environ.get('DOC2US_PASSWORD', ''))
+    ap.add_argument('--dry-run', action='store_true', default=True)
+    args = ap.parse_args()
+
+    manifest = build_doc2us_automation_manifest(args.queue_xlsx, dry_run=True)
+    manifest['login_email'] = args.email
+    manifest['password_supplied'] = bool(args.password)
+    print(json.dumps(manifest, indent=2, ensure_ascii=False))
+    print('\nNEXT IMPLEMENTATION STEP: map these manifest actions to exact Doc2Us selectors in Playwright.')
+    print('Final request/submit buttons must remain blocked behind a pharmacist confirmation gate.')
+    return 0
 
 
-def test_patient_registration_gender_uses_raw_gender_then_ic_fallback():
-    assert _gender_from_row(pd.Series({"gender": "Female", "patient_ic": "930801136321"})) == "Female"
-    assert _gender_from_row(pd.Series({"gender": "", "patient_ic": "930801136321"})) == "Male"
-    assert _gender_from_row(pd.Series({"gender": "", "patient_ic": "930801136322"})) == "Female"
-
-
-def test_doc2us_deploy_queue_includes_gender_for_registration():
-    assert "gender" in DOC2US_DEPLOY_COLUMNS
-    assert DOC2US_DEPLOY_COLUMNS.index("gender") < DOC2US_DEPLOY_COLUMNS.index("mobile")
+if __name__ == '__main__':
+    raise SystemExit(main())

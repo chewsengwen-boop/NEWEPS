@@ -1,106 +1,21 @@
-from pathlib import Path
-
 import pandas as pd
-from fastapi.testclient import TestClient
 
-from app import main
-from app.web_logic import doc2us_deploy_columns
-
-
-def _make_ready_job(tmp_path):
-    job_id = 'routejob123'
-    job_dir = tmp_path / job_id
-    job_dir.mkdir()
-    row = {col: '' for col in doc2us_deploy_columns()}
-    row.update({
-        'status': 'READY',
-        'patient_name': 'Test Patient',
-        'patient_ic': '900101131234',
-        'mobile': '0123456789',
-        'email': '900101131234@doc2us.com',
-        'item_name': 'Amlodipine 10mg',
-        'active_ingredients': 'Amlodipine',
-        'indication': 'Hypertension',
-        'doc2us_icd_code': 'BA00.Z',
-        'doc2us_indication': 'Essential hypertension, unspecified',
-        'diagnosis_search': 'BA00.Z',
-        'route': 'Oral',
-        'dose': '1',
-        'dose_unit': 'tab(s)/cap(s)',
-        'frequency': 'Once daily',
-        'duration_days': 30,
-        'prescribed_amount': 30,
-        'prescribed_unit': 'tablet(s)',
-        'drug_remark': 'refill medication',
-        'questionnaire_mode': 'LTM',
-        'bp': '120/80',
-        'hr': '75',
-        'glucose': '6.0',
-        'last_appointment_date': '2026-05-01',
-        'next_appointment_date': '2026-06-30',
-        'follow_up_under': 'Alpro',
-        'referred_by': 'Johnny Chew Seng Wen',
-        'pharmacist_reg_no': '018161',
-        'screening_remarks': 'refill medication',
-        'skip_reason': '',
-        'medication_class': 'B',
-    })
-    plan_path = job_dir / 'route_EPS_PLAN.xlsx'
-    pd.DataFrame([row]).to_excel(plan_path, index=False, sheet_name='EPS_PLAN')
-    return job_id
+from app.doc2us_live import _email_from_ic, _gender_from_row, _ic_to_dob, _normalise_phone
+from app.web_logic import DOC2US_DEPLOY_COLUMNS
 
 
-def test_website_deploy_button_runs_live_submitter_without_500(tmp_path, monkeypatch):
-    job_id = _make_ready_job(tmp_path)
-    calls = []
-
-    def fake_submit(queue_path, screenshot_dir, final_submit=True):
-        q = pd.read_excel(queue_path, sheet_name='DOC2US_READY_UPLOAD')
-        calls.append({'queue_path': str(queue_path), 'screenshot_dir': str(screenshot_dir), 'final_submit': final_submit, 'rows': len(q)})
-        Path(screenshot_dir).mkdir(parents=True, exist_ok=True)
-        return {
-            'submitted_count': len(q),
-            'failed_count': 0,
-            'screenshot_dir': str(screenshot_dir),
-            'results': [{
-                'row': 0,
-                'patient_ic': '900101131234',
-                'medication': 'Amlodipine 10mg',
-                'status': 'VERIFIED',
-                'before_count': 10,
-                'after_count': 11,
-            }],
-        }
-
-    monkeypatch.setenv('EPS_STAFF_ACCOUNTS_JSON', '[{"staff_label":"Staff A","app_email":"staffa@example.com","app_password":"app-pass","doc2us_email":"doc-a@example.com","doc2us_password":"doc-pass"}]')
-    monkeypatch.setattr(main, 'JOBS_DIR', tmp_path)
-    monkeypatch.setattr('app.web_logic.submit_doc2us_queue_live', fake_submit)
-
-    client = TestClient(main.app)
-    client.cookies.set('eps_email', 'staffa@example.com')
-    response = client.post(f'/deploy/{job_id}', data={}, follow_redirects=True)
-
-    assert response.status_code == 200
-    assert 'Doc2Us Batch Deployment Running' in response.text or 'Doc2Us Live Deployment Status' in response.text
-    assert 'Staff A' in response.text
-    assert (tmp_path / job_id / 'doc2us_deployment_progress.json').exists()
+def test_patient_registration_helpers_derive_ic_dob_email_and_phone():
+    assert _ic_to_dob("930801136321") == "1993-08-01"
+    assert _email_from_ic("930801-13-6321") == "930801136321@doc2us.com"
+    assert _normalise_phone("012-345 6789") == "60123456789"
 
 
-def test_review_page_uses_dropdowns_for_frequency_duration_and_amount(tmp_path, monkeypatch):
-    job_id = _make_ready_job(tmp_path)
-    monkeypatch.setattr(main, 'JOBS_DIR', tmp_path)
-    client = TestClient(main.app)
-    client.cookies.set('eps_email', 'staffa@example.com')
+def test_patient_registration_gender_uses_raw_gender_then_ic_fallback():
+    assert _gender_from_row(pd.Series({"gender": "Female", "patient_ic": "930801136321"})) == "Female"
+    assert _gender_from_row(pd.Series({"gender": "", "patient_ic": "930801136321"})) == "Male"
+    assert _gender_from_row(pd.Series({"gender": "", "patient_ic": "930801136322"})) == "Female"
 
-    response = client.get(f'/review/{job_id}')
 
-    assert response.status_code == 200
-    html = response.text
-    assert '<select name="row_0_route"' in html
-    assert '<select name="row_0_dose_unit"' in html
-    assert '<select name="row_0_frequency"' in html
-    assert '<select name="row_0_duration_days"' in html
-    assert '<select name="row_0_prescribed_amount"' in html
-
-    assert '<option value="Once daily" selected>Once daily</option>' in response.text
-    assert '<option value="30" selected>30</option>' in response.text
+def test_doc2us_deploy_queue_includes_gender_for_registration():
+    assert "gender" in DOC2US_DEPLOY_COLUMNS
+    assert DOC2US_DEPLOY_COLUMNS.index("gender") < DOC2US_DEPLOY_COLUMNS.index("mobile")

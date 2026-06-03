@@ -1,10 +1,29 @@
-.git
-__pycache__
-*.pyc
-.pytest_cache
-.venv
-venv
-node_modules
-.env
-jobs
-*.zip
+import pandas as pd
+
+from app.doc2us_live import Doc2UsLiveRunner
+
+
+def test_plain_simvastatin_rejects_vytorin_combination_result(tmp_path):
+    runner = Doc2UsLiveRunner(tmp_path)
+    row = pd.Series({
+        'item_name': '#PHARMANIAGA SIMVASTATIN 20MG 10S',
+        'active_ingredients': 'SIMVASTATIN',
+    })
+    assert runner._active_ingredients_are_compatible(row, 'PHARMANIAGA SIMVASTATIN 20MG TABLET')
+    assert not runner._active_ingredients_are_compatible(row, 'Ezetimibe 10mg & Simvastatin 10mg Tablet (VYTORIN 10/10)')
+    assert not runner._strengths_are_compatible(row, 'Ezetimibe 10mg & Simvastatin 10mg Tablet (VYTORIN 10/10)')
+
+
+def test_registration_form_text_is_treated_as_already_open(tmp_path):
+    runner = Doc2UsLiveRunner(tmp_path)
+
+    class FakePage:
+        def locator(self, selector):
+            class Loc:
+                def count(self): return 0
+            return Loc()
+
+    page = FakePage()
+    page_text = 'Register New Patient Kindly Fill In All The Details Below *Email *Full Name (As per IC/Passport) *IC Number/Passport Number Enter to search *D.O.B *Contact No *Password Submit'
+    runner._body_text_safe = lambda page, timeout=3000: page_text
+    assert runner._registration_form_visible(page)

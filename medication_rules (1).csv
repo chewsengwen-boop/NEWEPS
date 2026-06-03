@@ -1,13 +1,1 @@
-<!doctype html>
-<html><head><meta charset="utf-8"><title>EPS Automation Login</title><link rel="stylesheet" href="/static/style.css"></head>
-<body><main class="card">
-<h1>EPS Shared Automation</h1>
-<p>Use your Doc2Us/EPS login. Pilot account enabled first.</p>
-{% if error %}<div class="err">{{ error }}</div>{% endif %}
-<form method="post" action="/login">
-<label>Email <input name="email" type="email" placeholder="staff@alpropharmacy.com" required></label>
-<label>Password <input name="password" type="password" required></label>
-<button type="submit">Login</button>
-</form>
-<p class="note">This tool prepares and submits data to reduce duplicate entry. It does not prescribe; pharmacist review remains required.</p>
-</main></body></html>
+body{font-family:Arial,sans-serif;background:#f6f8fb;color:#1f2937;margin:0;padding:32px}.card{max-width:520px;margin:40px auto;background:white;padding:28px;border-radius:14px;box-shadow:0 8px 30px #0001}.wide{max-width:1200px;margin:20px auto;background:white;padding:24px;border-radius:14px;box-shadow:0 8px 30px #0001}label{display:block;margin:14px 0;font-weight:600}input{display:block;width:100%;padding:11px;margin-top:6px;border:1px solid #cbd5e1;border-radius:8px}button,.button{background:#0f766e;color:white;border:0;border-radius:8px;padding:11px 16px;text-decoration:none;display:inline-block;font-weight:700}.err{background:#fee2e2;color:#991b1b;padding:10px;border-radius:8px}.note{background:#eef6ff;padding:12px;border-radius:8px;margin-top:18px}.summary{margin:14px 0}.pill{padding:8px 12px;border-radius:999px;margin-right:10px;font-weight:700}.READY{background:#dcfce7}.REVIEW{background:#fef3c7}.OMIT{background:#fee2e2}table{border-collapse:collapse;width:100%;font-size:13px}th,td{border:1px solid #e5e7eb;padding:7px;vertical-align:top}th{background:#f1f5f9;text-align:left}
