@@ -1,30 +1,37 @@
-from pathlib import Path
-
-import pandas as pd
-
-from app import eps_bulk_core
-
-
-def test_item_description_active_ingredient_matches_rule_and_prefills_fields(tmp_path, monkeypatch):
-    raw_rows = [
-        ['Report title', '', '', '', '', '', '', '', '', '', '', '', ''],
-        ['Store', 'Item Division', 'Client Name', 'Client IC', 'Client Gender', 'Client Mobile', 'Sales Person', 'Item Code', 'Item Description', 'Item Name', 'Qty', 'Sales Type', 'Net Sold Price ex. MGST Tax'],
-        ['QSBFL1', '500 - POISON B', 'TEST PATIENT', '790728135127', 'M', '60123456789', 'PHARMACIST', 'L66472', 'PERINDOPRIL TERT-BUTYLAMINE', 'COVINACE 8MG 10S', '1', '0', '10'],
-    ]
-    raw_path = tmp_path / 'raw.xlsx'
-    pd.DataFrame(raw_rows).to_excel(raw_path, index=False, header=False)
-
-    monkeypatch.setattr(eps_bulk_core, 'RULES_PATH', Path(__file__).resolve().parents[1] / 'data' / 'medication_rules.csv')
-    plan = eps_bulk_core.make_plan(str(raw_path), 'PHARMACIST', '12345', pd.Timestamp('2026-06-03').date())
-    row = plan.iloc[0]
-
-    assert row['active_ingredients'] == 'PERINDOPRIL TERT-BUTYLAMINE'
-    assert row['indication'] == 'Hypertension'
-    assert row['doc2us_icd_code'] == 'BA00.Z'
-    assert row['doc2us_indication'] == 'Essential hypertension, unspecified'
-    assert row['frequency'] == 'Every morning'
-    assert int(row['duration_days']) == 10
-    assert int(row['prescribed_amount']) == 10
-    assert row['bp'] == '120/80'
-    assert row['hr'] == '75'
-    assert row['glucose'] == '6.0'
+icd_code,icd_description
+BA00.Z,"Essential hypertension, unspecified"
+5A11,"Type 2 diabetes mellitus"
+5A10,"Type 1 diabetes mellitus"
+5C80.0Z,"Hypercholesterolaemia, unspecified"
+BA6Z,"Ischaemic heart diseases, unspecified"
+BD10,"Congestive heart failure"
+BC9Z,"Cardiac arrhythmia, unspecified"
+8B11.5Z,"Cerebral ischaemic stroke, unspecified"
+GB6Z,"Kidney failure, unspecified"
+5A0Z,"Disorders of the thyroid gland or thyroid hormones system, unspecified"
+FA25,"Gout"
+9C61.Z,"Glaucoma, unspecified"
+BD71,"Deep vein thrombosis"
+1E51.0Z,"Chronic hepatitis B, unspecified"
+1E51.1,"Chronic hepatitis C"
+QC90.6,"Contact with or exposure to human immunodeficiency virus"
+MG3Z,"Pain, unspecified"
+8E43.0Z,"Neuropathic pain, unspecified"
+ME84.2Z,"Low back pain, unspecified"
+8A6Z,"Epilepsy or seizures, unspecified"
+GA90,"Hyperplasia of prostate"
+1F28.Z,"Dermatophytosis, unspecified"
+EE12.1,"Onychomycosis"
+ED80.Z,"Acne, unspecified"
+MD90,"Nausea or vomiting"
+MD92,"Dyspepsia"
+DA42.Z,"Gastritis, unspecified"
+DA22.Z,"Gastro-oesophageal reflux disease, unspecified"
+1A40.Z,"Infectious gastroenteritis or colitis without specification of infectious agent"
+FB32.5,"Muscle strain or sprain"
+FB56.2,"Myalgia"
+8A80.Z,"Migraine, unspecified"
+8A81.Z,"Tension-type headache, unspecified"
+CA23,"Asthma"
+4A8Z,"Allergic or hypersensitivity conditions of unspecified type"
+CA08.0Z,"Allergic rhinitis, unspecified"
