@@ -628,7 +628,7 @@ class Doc2UsLiveRunner:
         # prefixes such as [RX], or long descriptions. Search first by a cleaned
         # brand token so a real MedicationId is selected; typed-only names submit
         # medicationId=null and the portal returns HTTP 500.
-        candidates = self._medication_search_terms(medication_name)
+        candidates = self._medication_search_terms_for_row(row)
         selected = False
         for term in candidates:
             med_input.fill(term)
@@ -661,6 +661,27 @@ class Doc2UsLiveRunner:
         if confirm.get_by_role('button', name='OK').count():
             confirm.get_by_role('button', name='OK').click(force=True)
         page.wait_for_timeout(2000)
+
+    def _medication_search_terms_for_row(self, row: pd.Series) -> list[str]:
+        """Build Doc2Us medication catalogue search terms.
+
+        Product/brand name is tried first. If Doc2Us has no selectable brand
+        result, fall back to the raw active ingredient from Octopus Item
+        Description, e.g. EQOVEX -> ETORICOXIB. This still selects a real
+        Doc2Us catalogue item instead of free-typing medicationId=null.
+        """
+        terms = self._medication_search_terms(_clean(row.get('item_name')))
+        active = _clean(row.get('active_ingredients'))
+        for piece in re.split(r'[,;/+]|\bAND\b|\bWITH\b', active, flags=re.IGNORECASE):
+            ingredient = re.sub(r'\s+', ' ', piece).strip().upper()
+            if not ingredient:
+                continue
+            if ingredient not in terms:
+                terms.append(ingredient)
+        active_clean = re.sub(r'\s+', ' ', active).strip().upper()
+        if active_clean and active_clean not in terms:
+            terms.append(active_clean)
+        return terms
 
     def _medication_search_terms(self, medication_name: str) -> list[str]:
         raw = _clean(medication_name)
