@@ -45,7 +45,23 @@ FREQUENCY_OPTIONS = [
     'Every 12 hours',
 ]
 ROUTE_OPTIONS = ['Oral', 'Topical', 'Ophthalmic', 'Otic', 'Nasal', 'Inhalation', 'Sublingual', 'Rectal', 'Vaginal']
-DOSE_UNIT_OPTIONS = ['tab(s)/cap(s)', 'tablet(s)', 'capsule(s)', 'ml', 'mg', 'mcg', 'g', 'drop(s)', 'puff(s)', 'sachet(s)', 'application(s)', 'unit(s)']
+DOSE_UNIT_OPTIONS = [
+        'tab(s)/cap(s)',
+        'mL',
+        'lozenge(s)',
+        'sachet(s)',
+        'drops',
+        'application',
+        'patches',
+        'puff(s)',
+        'Inhalation(s)',
+        'spray(s)',
+        'unit(s)',
+        'supp.',
+        'pessaries',
+        'nebules',
+        'Ampoule(s)',
+    ]
 DURATION_DAY_OPTIONS = ['3', '5', '7', '10', '14', '21', '28', '30', '60', '90']
 PRESCRIBED_AMOUNT_OPTIONS = ['1', '3', '5', '7', '10', '14', '15', '20', '21', '28', '30', '60', '90']
 PRESCRIBED_UNIT_OPTIONS = ['tablet(s)', 'capsule(s)', 'bottle(s)', 'tube(s)', 'box(es)', 'sachet(s)', 'ml', 'unit(s)']
