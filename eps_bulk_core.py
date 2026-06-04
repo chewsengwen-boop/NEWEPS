@@ -223,12 +223,91 @@ class Doc2UsLiveRunner:
         page.wait_for_url('**/dashboard', timeout=60000)
 
     def _select_option(self, page, select_locator, contains_text: str) -> None:
-        select_locator.click(force=True, timeout=15000)
-        page.wait_for_timeout(300)
-        option = page.locator('mat-option').filter(has_text=contains_text).first
-        option.wait_for(state='visible', timeout=15000)
-        option.click(force=True)
-        page.wait_for_timeout(300)
+        """Select a Material mat-select option with portal-safe synonyms.
+
+        Doc2Us option labels are inconsistent between builds. Some rows reviewed
+        from Excel carry short units such as `mg`, but the live Add Drug dose
+        unit dropdown may only expose dosage-form units like `tab(s)/cap(s)`.
+        Do not wait forever for a missing `mat-option:has-text("mg")`; expand
+        synonyms, inspect visible options, and fail with evidence if none match.
+        """
+        wanted = _clean(contains_text)
+        synonyms = {
+            'mg': ['mg', 'milligram', 'milligram(s)', 'tab(s)/cap(s)', 'tablet(s)', 'capsule(s)'],
+            'mcg': ['mcg', 'microgram', 'microgram(s)'],
+            'g': ['g', 'gram', 'gram(s)'],
+            'ml': ['ml', 'millilitre', 'milliliter', 'millilitre(s)', 'milliliter(s)'],
+            'tablet': ['tab(s)/cap(s)', 'tablet(s)', 'tablet'],
+            'tablets': ['tab(s)/cap(s)', 'tablet(s)', 'tablet'],
+            'tab': ['tab(s)/cap(s)', 'tablet(s)', 'tablet'],
+            'tabs': ['tab(s)/cap(s)', 'tablet(s)', 'tablet'],
+            'capsule': ['tab(s)/cap(s)', 'capsule(s)', 'capsule'],
+            'capsules': ['tab(s)/cap(s)', 'capsule(s)', 'capsule'],
+            'cap': ['tab(s)/cap(s)', 'capsule(s)', 'capsule'],
+            'caps': ['tab(s)/cap(s)', 'capsule(s)', 'capsule'],
+        }
+        candidates = [wanted]
+        for alt in synonyms.get(wanted.lower(), []):
+            if alt and alt not in candidates:
+                candidates.append(alt)
+        last_visible = []
+        for open_attempt in range(3):
+            select_locator.click(force=True, timeout=15000)
+            page.wait_for_timeout(500)
+            try:
+                page.wait_for_function(
+                    "document.querySelectorAll('mat-option:not(.mat-option-disabled)').length > 0",
+                    timeout=8000,
+                )
+            except Exception:
+                if open_attempt < 2:
+                    try:
+                        page.keyboard.press('Escape')
+                        page.wait_for_timeout(400)
+                    except Exception:
+                        pass
+                    continue
+            options = page.locator('mat-option:not(.mat-option-disabled)')
+            try:
+                last_visible = [t.strip() for t in options.all_inner_texts() if t.strip()]
+            except Exception:
+                last_visible = []
+            for cand in candidates:
+                if not cand:
+                    continue
+                loc = options.filter(has_text=re.compile(re.escape(cand), re.I)).first
+                try:
+                    if loc.count() and loc.is_visible():
+                        loc.click(force=True)
+                        page.wait_for_timeout(300)
+                        return
+                except Exception:
+                    pass
+            # exact normalized contains fallback in JS for labels with hidden whitespace
+            try:
+                clicked = page.evaluate(
+                    """cands => {
+                        const norm = s => (s || '').toLowerCase().replace(/\\s+/g, ' ').trim();
+                        const opts = Array.from(document.querySelectorAll('mat-option:not(.mat-option-disabled)'));
+                        for (const cand of cands.map(norm)) {
+                            const el = opts.find(o => norm(o.innerText || o.textContent).includes(cand));
+                            if (el) { el.click(); return true; }
+                        }
+                        return false;
+                    }""",
+                    candidates,
+                )
+                if clicked:
+                    page.wait_for_timeout(300)
+                    return
+            except Exception:
+                pass
+            try:
+                page.keyboard.press('Escape')
+                page.wait_for_timeout(400)
+            except Exception:
+                pass
+        raise RuntimeError(f'Doc2Us dropdown option not found for {wanted!r}. Tried {candidates}. Visible options: {last_visible[:30]}')
 
     def _click_text_if_visible(self, page, text: str, timeout: int = 3000) -> bool:
         loc = page.get_by_text(text, exact=False).first
@@ -336,11 +415,24 @@ class Doc2UsLiveRunner:
             self._register_patient_if_missing(page, row)
             registered_patient = True
             before_count = self._patient_record_count(page, ic)
-            if page.get_by_role('button', name='Medication Record').count():
-                page.get_by_role('button', name='Medication Record').first.click(force=True)
-            else:
+            # Newly registered patients can take a few seconds to appear in the
+            # medication-record list. Re-search before deciding that registration
+            # failed; do not claim registration completed when the portal still
+            # shows No Patient Found.
+            opened_after_register = False
+            for attempt in range(5):
+                if page.get_by_role('button', name='Medication Record').count():
+                    page.get_by_role('button', name='Medication Record').first.click(force=True)
+                    opened_after_register = True
+                    break
+                page.wait_for_timeout(2500)
+                self._goto_patient_search(page, ic)
+            if not opened_after_register:
                 body = self._body_text_safe(page, timeout=5000)
-                raise RuntimeError(f'Patient registration completed but Medication Record button is still unavailable for IC {ic}. Page: {body[:500]}')
+                raise RuntimeError(
+                    f'Patient registration was submitted but the live Medication Record search still cannot find IC {ic}. '
+                    f'This row is REGISTERED_UNVERIFIED; do not create medication record until portal search shows the patient. Page: {body[:800]}'
+                )
         page.wait_for_timeout(1000)
         page.get_by_text('Create New Medication Record', exact=False).click(force=True, timeout=30000)
         page.wait_for_timeout(1500)
@@ -491,15 +583,16 @@ class Doc2UsLiveRunner:
             raise RuntimeError(f'Clicked Register New Patient for IC {ic}, but Doc2Us stayed on the patient list page. URL: {page.url}. Page: {body_after_register_click[:800]}')
         self._fill_first_visible(page, [
             'input[formcontrolname="name"]', 'input[formcontrolname="fullName"]', 'input[formcontrolname="patientName"]',
-            'input[name="name"]', 'input[placeholder*="Name" i]'
+            'input[name="name"]', 'input[placeholder*="Full Name" i]', 'input[placeholder*="Name" i]'
         ], name)
         self._fill_first_visible(page, [
             'input[formcontrolname="ic"]', 'input[formcontrolname="nric"]', 'input[formcontrolname="identityNo"]',
-            'input[formcontrolname="identityNumber"]', 'input[name="ic"]', 'input[placeholder*="IC" i]', 'input[placeholder*="NRIC" i]'
+            'input[formcontrolname="identityNumber"]', 'input[name="ic"]', 'input[placeholder*="IC" i]', 'input[placeholder*="NRIC" i]',
+            'input[placeholder*="Passport" i]', 'input[placeholder*="search" i]'
         ], ic)
         self._fill_first_visible(page, [
             'input[formcontrolname="mobile"]', 'input[formcontrolname="phone"]', 'input[formcontrolname="phoneNumber"]',
-            'input[name="mobile"]', 'input[placeholder*="Mobile" i]', 'input[placeholder*="Phone" i]'
+            'input[name="mobile"]', 'input[placeholder*="Mobile" i]', 'input[placeholder*="Phone" i]', 'input[placeholder*="Contact" i]'
         ], mobile)
         self._fill_first_visible(page, [
             'input[formcontrolname="birthday"]', 'input[formcontrolname="dob"]', 'input[formcontrolname="dateOfBirth"]',
@@ -509,7 +602,8 @@ class Doc2UsLiveRunner:
         self._select_gender_if_present(page, gender)
         self._fill_first_visible(page, [
             'input[formcontrolname="address"]', 'textarea[formcontrolname="address"]', 'input[name="address"]',
-            'textarea[name="address"]', 'input[placeholder*="Address" i]', 'textarea[placeholder*="Address" i]'
+            'textarea[name="address"]', 'input[placeholder*="Home Address" i]', 'textarea[placeholder*="Home Address" i]',
+            'input[placeholder*="Address" i]', 'textarea[placeholder*="Address" i]'
         ], 'sibu')
         self._fill_first_visible(page, [
             'input[formcontrolname="email"]', 'input[type="email"]', 'input[name="email"]', 'input[placeholder*="Email" i]'
@@ -686,7 +780,14 @@ class Doc2UsLiveRunner:
         modal = page.locator('ngb-modal-window')
         self._select_option(page, modal.locator('mat-select').nth(0), _clean(row.get('route')) or 'Oral')
         dose_unit = _clean(row.get('dose_unit')) or 'tab(s)/cap(s)'
+        medication_identity = ' '.join([_clean(row.get('item_name')), _clean(row.get('active_ingredients'))]).lower()
+        # For oral tablet/capsule products (e.g. CELECOXIB 200MG 10S), the
+        # Doc2Us dose unit is the dosage form, not the strength unit. Rows can
+        # arrive from review as `mg`; convert before opening the dropdown so the
+        # live portal is not asked to choose a non-existent `mg` option.
         if dose_unit.lower() in {'tablet', 'tablets', 'tab', 'tabs', 'capsule', 'capsules', 'cap', 'caps'}:
+            dose_unit = 'tab(s)/cap(s)'
+        elif dose_unit.lower() in {'mg', 'mcg', 'g'} and any(tok in medication_identity for tok in ['tablet', 'tab ', ' cap', 'capsule', ' 10s', ' 20s', ' 30s', ' 60s']):
             dose_unit = 'tab(s)/cap(s)'
         self._select_option(page, modal.locator('mat-select').nth(1), dose_unit)
         self._select_option(page, modal.locator('mat-select').nth(2), _clean(row.get('frequency')) or 'Once daily')
