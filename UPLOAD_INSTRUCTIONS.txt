@@ -1,1 +1,10 @@
-Upload all contents of this folder to GitHub root and replace existing files. Includes registration fix for patient 801126135147. Root Dockerfile must start FROM python:3.11-slim.
+.git
+__pycache__
+*.pyc
+.pytest_cache
+.venv
+venv
+node_modules
+.env
+jobs
+*.zip
