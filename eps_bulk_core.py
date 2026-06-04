@@ -1179,6 +1179,12 @@ class Doc2UsLiveRunner:
             reg_no = '12345'
         medication_list = _clean(row.get('item_name')) or 'refill medication'
         medication_history = _clean(row.get('indication')) or _clean(row.get('doc2us_indication')) or 'long term medication'
+        # LTM questionnaire makes Last/Next Appointment mandatory. Some raw EPS
+        # uploads only calculate next appointment; leaving last appointment blank
+        # keeps the Submit button from creating a record even though it was clicked.
+        today_iso = pd.Timestamp.now(tz='Asia/Kuala_Lumpur').date().isoformat()
+        last_appt = _clean(row.get('last_appointment_date')) or today_iso
+        next_appt = _clean(row.get('next_appointment_date')) or last_appt
         for control, value in [
             ('input[formcontrolname="heartRate"]', _clean(row.get('hr')) or '75'),
             ('input[formcontrolname="bloodPressure"]', _clean(row.get('bp')) or '120/80'),
@@ -1187,8 +1193,8 @@ class Doc2UsLiveRunner:
             ('textarea[formcontrolname="medicationHistory"]', medication_history),
             ('input[formcontrolname="reviewedBy"]', _clean(row.get('referred_by')) or 'PHARMACIST'),
             ('input[formcontrolname="registerNumber"]', reg_no),
-            ('input[formcontrolname="lastAppointmentDate"]', _clean(row.get('last_appointment_date'))),
-            ('input[formcontrolname="nextAppointmentDate"]', _clean(row.get('next_appointment_date'))),
+            ('input[formcontrolname="lastAppointmentDate"]', last_appt),
+            ('input[formcontrolname="nextAppointmentDate"]', next_appt),
             ('input[formcontrolname="followUpUnder"]', _clean(row.get('follow_up_under')) or 'klinik kesihatan'),
             ('textarea[formcontrolname="remarks"]', _clean(row.get('screening_remarks')) or 'refill medication'),
         ]:

@@ -1,0 +1,87 @@
+NEWEPS Doc2Us exact active-ingredient matching update - 2026-06-04
+
+User request:
+If brand name is not in the safe listing, use the raw data active ingredient only when it matches completely. Do not assume or auto-change by substring/guessing. Submit the rows that changed from REVIEW to READY.
+
+Automation changes made:
+1) app/eps_bulk_core.py
+- Product/brand matching now checks rule pattern against Item Name only.
+- Active ingredient fallback is exact-match only against Item Description.
+- It normalizes separators/spacing only, e.g. '/' and ';' are treated as separators.
+- It does NOT allow substring guessing.
+- Example: LOSARTAN will not match LOSARTAN POTASSIUM unless the exact ingredient in the raw data and rule matches.
+
+2) medication_rules.csv updated in both:
+- data/medication_rules.csv
+- app/medication_rules.csv
+
+Rules added from reviewed/safely handled rows:
+- CELECOXIB
+- BENCOVEE
+- CLOTRIMAZOLE; BETAMETHASONE DIPROPIONATE
+- SERETIDE
+- SALMETEROL
+- LOSARTAN
+- ZYLOVAA
+
+3) app/eps_bulk_core.py prescribed unit update:
+- puff(s), Inhalation(s), spray(s), patches, nebules, Ampoule(s), and application now use prescribed_unit = unit(s), not tablet(s).
+
+Regenerated raw plan result from:
+C:\Users\User\Downloads\Newest Doc2us_04-06-2026 (Web) (1).xlsx
+
+Plan counts after fix:
+- READY: 6
+- REVIEW: 2
+
+Rows now READY:
+1) 961115136358 / AMY LEONG DING DING / *PERINACE 4MG TAB 3X10S / PERINDOPRIL
+2) 861226526019 / ANDREW NGO CHEK SOONG / SANDOZ REVCOX 200MG 10S / CELECOXIB
+3) 000212131644 / FRALIZA ANAK BAJAK / *SERETIDE ACCUHALER 50/250MCG 60 DOSES / SALMETEROL XINOFOATE + FLUTICASONE PROPIONATE
+4) 830828136112 / JESSI CHANG MEI LIM / ZYLOVAA 50MG 10S / LOSARTAN POTASSIUM
+5) 801126135147 / LEE FOOK KING / #BENCOVEE CREAM 15G / CLOTRIMAZOLE + BETAMETHASONE DIPROPIONATE
+6) 850611136048 / LINDA TIONG FEI FEI / #BENCOVEE CREAM 15G / CLOTRIMAZOLE + BETAMETHASONE DIPROPIONATE
+
+Rows still REVIEW because no exact approved rule exists yet:
+1) 770416135488 / SABTUYAH BINTI SAHRIN / APO-SUMATRIPTAN 50MG 6S / SUMATRIPTAN
+2) 751107135800 / TANG SING SING / HEMAPIX 5MG 6X10S TABS / APIXABAN
+
+I did not convert SUMATRIPTAN or APIXABAN because that would be a new clinical rule and you asked not to simply change or assume.
+
+Live EPS verification for changed REVIEW-to-READY rows:
+1) 861226526019 / ANDREW NGO CHEK SOONG
+Record: #4303992
+Created: 04/06/2026; 16:35
+Status: Approved By Dr. Dunstan Empawi anak Joseph Melayu
+
+2) 801126135147 / LEE FOOK KING
+Record: #4303899
+Created: 04/06/2026; 16:12
+Status: Approved By Dr. Insyirah Binti Ismadi
+
+3) 850611136048 / LINDA TIONG FEI FEI
+Record: #4303901
+Created: 04/06/2026; 16:13
+Status: Approved By Dr. Insyirah Binti Ismadi
+
+4) 000212131644 / FRALIZA ANAK BAJAK
+Record: #4304066
+Created: 04/06/2026; 17:01
+Status: Approved By Dr. Santhini Devi A/P Sukhmaran
+
+5) 830828136112 / JESSI CHANG MEI LIM
+Record: #4304072
+Created: 04/06/2026; 17:02
+Status: Approved By Dr. Santhini Devi A/P Sukhmaran
+
+No duplicate submission was made for records that already existed from the prior live submission run; I verified the records in EPS instead of creating duplicate requests.
+
+Verification screenshots:
+/tmp/doc2us_verify_changed_review_to_ready/861226526019_record_list.png
+/tmp/doc2us_verify_changed_review_to_ready/801126135147_record_list.png
+/tmp/doc2us_verify_changed_review_to_ready/850611136048_record_list.png
+/tmp/doc2us_verify_changed_review_to_ready/000212131644_record_list.png
+/tmp/doc2us_verify_changed_review_to_ready/830828136112_record_list.png
+
+Deployment note:
+If the live web app runs from GitHub/Render, upload/commit this package and redeploy/restart, otherwise the online app will still use old rules/matching.

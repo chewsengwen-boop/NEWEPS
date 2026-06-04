@@ -859,7 +859,14 @@ class Doc2UsLiveRunner:
         page.get_by_role('button', name='ADD DRUG').click(force=True, timeout=30000)
         page.wait_for_timeout(700)
         modal = page.locator('ngb-modal-window')
-        self._select_option(page, modal.locator('mat-select').nth(0), _clean(row.get('route')) or 'Oral')
+        route = _clean(row.get('route')) or 'Oral'
+        route_aliases = {
+            'nasal': 'Intranasal',
+            'inhalation': 'Oral Inhalation',
+            'ophthalmic': 'Ocular',
+        }
+        route = route_aliases.get(route.lower(), route)
+        self._select_option(page, modal.locator('mat-select').nth(0), route)
         dose_unit = _clean(row.get('dose_unit')) or 'tab(s)/cap(s)'
         canonical_dose_units = {
             'ml': 'mL',
@@ -884,6 +891,12 @@ class Doc2UsLiveRunner:
         self._select_option(page, modal.locator('mat-select').nth(1), dose_unit)
         self._select_option(page, modal.locator('mat-select').nth(2), _clean(row.get('frequency')) or 'Once daily')
         prescribed_unit = _clean(row.get('prescribed_unit')) or 'tablet(s)'
+        prescribed_unit_aliases = {
+            'ml': 'mL',
+            'ampoule': 'Ampoule(s)',
+            'ampoules': 'Ampoule(s)',
+        }
+        prescribed_unit = prescribed_unit_aliases.get(prescribed_unit.lower(), prescribed_unit)
         if prescribed_unit.lower() in {'tablet', 'tablets', 'tab', 'tabs'}:
             prescribed_unit = 'tablet(s)'
         elif prescribed_unit.lower() in {'capsule', 'capsules', 'cap', 'caps'}:
@@ -1166,6 +1179,12 @@ class Doc2UsLiveRunner:
             reg_no = '12345'
         medication_list = _clean(row.get('item_name')) or 'refill medication'
         medication_history = _clean(row.get('indication')) or _clean(row.get('doc2us_indication')) or 'long term medication'
+        # LTM questionnaire makes Last/Next Appointment mandatory. Some raw EPS
+        # uploads only calculate next appointment; leaving last appointment blank
+        # keeps the Submit button from creating a record even though it was clicked.
+        today_iso = pd.Timestamp.now(tz='Asia/Kuala_Lumpur').date().isoformat()
+        last_appt = _clean(row.get('last_appointment_date')) or today_iso
+        next_appt = _clean(row.get('next_appointment_date')) or last_appt
         for control, value in [
             ('input[formcontrolname="heartRate"]', _clean(row.get('hr')) or '75'),
             ('input[formcontrolname="bloodPressure"]', _clean(row.get('bp')) or '120/80'),
@@ -1174,8 +1193,8 @@ class Doc2UsLiveRunner:
             ('textarea[formcontrolname="medicationHistory"]', medication_history),
             ('input[formcontrolname="reviewedBy"]', _clean(row.get('referred_by')) or 'PHARMACIST'),
             ('input[formcontrolname="registerNumber"]', reg_no),
-            ('input[formcontrolname="lastAppointmentDate"]', _clean(row.get('last_appointment_date'))),
-            ('input[formcontrolname="nextAppointmentDate"]', _clean(row.get('next_appointment_date'))),
+            ('input[formcontrolname="lastAppointmentDate"]', last_appt),
+            ('input[formcontrolname="nextAppointmentDate"]', next_appt),
             ('input[formcontrolname="followUpUnder"]', _clean(row.get('follow_up_under')) or 'klinik kesihatan'),
             ('textarea[formcontrolname="remarks"]', _clean(row.get('screening_remarks')) or 'refill medication'),
         ]:

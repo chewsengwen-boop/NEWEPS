@@ -133,18 +133,38 @@ def load_rules(path: Path = RULES_PATH) -> List[Rule]:
     return rows
 
 
-def match_rule(item_name: str, rules: List[Rule], item_description: str = '') -> Optional[Rule]:
-    """Match either product name or Octopus Item Description.
+def _ingredient_key(s: str) -> str:
+    """Normalize active-ingredient text for exact matching only.
 
-    Octopus poison B/C exports usually put the active ingredient in Item
-    Description. Matching this field lets the Review + Edit page pre-fill
-    Doc2Us indication/dose/frequency/duration from active ingredient even when
-    the trade/product name is new.
+    This intentionally removes separators/spacing but does not allow substring
+    matching. Example: 'CLOTRIMAZOLE/ BETAMETHASONE DIPROPIONATE' can match a
+    rule with 'CLOTRIMAZOLE; BETAMETHASONE DIPROPIONATE', but 'LOSARTAN' will
+    not match 'LOSARTAN POTASSIUM' unless that exact ingredient is in the rule.
     """
-    n = norm_name(' '.join([item_name or '', item_description or '']))
+    parts = [p for p in re.split(r'[/;+,&]+', (s or '').upper()) if p.strip()]
+    cleaned = [' '.join(re.sub(r'[^A-Z0-9]+', ' ', p).split()) for p in parts]
+    cleaned = [p for p in cleaned if p]
+    return '|'.join(sorted(cleaned))
+
+
+def match_rule(item_name: str, rules: List[Rule], item_description: str = '') -> Optional[Rule]:
+    """Match rule conservatively.
+
+    1. Product/brand rule pattern may match inside Item Name only.
+    2. If brand is not listed, active ingredient may match only when the raw
+       Item Description completely equals the rule active_ingredients after
+       separator/spacing normalization. No substring guessing is allowed.
+    """
+    item_norm = norm_name(item_name or '')
     for r in rules:
-        if r.pattern and r.pattern in n:
+        if r.pattern and r.pattern in item_norm:
             return r
+
+    desc_key = _ingredient_key(item_description or '')
+    if desc_key:
+        for r in rules:
+            if r.active_ingredients and _ingredient_key(r.active_ingredients) == desc_key:
+                return r
     return None
 
 
@@ -231,7 +251,8 @@ def make_plan(input_xlsx: str, pharmacist_name: str, reg_no: str, apply_date: dt
             rule_pattern=rule.pattern, medication_class=rule.klass, indication=rule.indication,
             diagnosis_search=rule.diagnosis_search, route=rule.route, dose=rule.dose,
             dose_unit=rule.unit, frequency=rule.frequency, duration_days=duration,
-            prescribed_amount=amount, prescribed_unit='tablet(s)',
+            prescribed_amount=amount,
+            prescribed_unit='unit(s)' if rule.unit in {'puff(s)', 'Inhalation(s)', 'spray(s)', 'patches', 'nebules', 'Ampoule(s)', 'application'} else 'tablet(s)',
             active_ingredients=item_description or rule.active_ingredients or item, doc2us_icd_code=rule.doc2us_icd_code,
             doc2us_indication=rule.doc2us_indication,
             drug_remark=rule.drug_remark_template or DEFAULTS['remarks'],
