@@ -861,9 +861,24 @@ class Doc2UsLiveRunner:
         modal = page.locator('ngb-modal-window')
         self._select_option(page, modal.locator('mat-select').nth(0), _clean(row.get('route')) or 'Oral')
         dose_unit = _clean(row.get('dose_unit')) or 'tab(s)/cap(s)'
-        # Preserve reviewed strength units such as MG. Only normalize obvious
-        # tablet/capsule wording. Never convert MG to tab(s)/cap(s), because
-        # Johnny expects the EPS portal data to match the reviewed input.
+        canonical_dose_units = {
+            'ml': 'mL',
+            'drop(s)': 'drops',
+            'drop': 'drops',
+            'drops': 'drops',
+            'application(s)': 'application',
+            'applications': 'application',
+            'application': 'application',
+            'patch': 'patches',
+            'patches': 'patches',
+            'inhalation': 'Inhalation(s)',
+            'inhalations': 'Inhalation(s)',
+            'ampoule': 'Ampoule(s)',
+            'ampoules': 'Ampoule(s)',
+        }
+        dose_unit = canonical_dose_units.get(dose_unit.lower(), dose_unit)
+        # Only normalize obvious tablet/capsule wording to Doc2Us' combined
+        # live portal option. Do not add strength units such as MG/MCG/G here.
         if dose_unit.lower() in {'tablet', 'tablets', 'tab', 'tabs', 'capsule', 'capsules', 'cap', 'caps'}:
             dose_unit = 'tab(s)/cap(s)'
         self._select_option(page, modal.locator('mat-select').nth(1), dose_unit)

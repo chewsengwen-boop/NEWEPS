@@ -25,11 +25,37 @@ def html_page(title: str, body: str) -> HTMLResponse:
     return HTMLResponse(f'<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{escape(title)}</title><style>{CSS}</style></head><body>{body}</body></html>')
 
 
+def canonical_dose_unit(value: object) -> str:
+    """Map old/non-portal labels to the exact live Doc2Us Dosage Unit labels."""
+    raw = str(value or '').strip()
+    key = raw.lower()
+    aliases = {
+        'ml': 'mL',
+        'drop(s)': 'drops',
+        'drop': 'drops',
+        'drops': 'drops',
+        'application(s)': 'application',
+        'applications': 'application',
+        'application': 'application',
+        'patch': 'patches',
+        'patches': 'patches',
+        'inhalation': 'Inhalation(s)',
+        'inhalations': 'Inhalation(s)',
+        'ampoule': 'Ampoule(s)',
+        'ampoules': 'Ampoule(s)',
+    }
+    return aliases.get(key, raw)
+
+
 def select_with_current(name: str, current: object, options: list[str]) -> str:
-    """Render a dropdown while preserving uncommon existing workbook values."""
-    value = str(current or '')
+    """Render a dropdown. Dose-unit values are restricted to live Doc2Us labels."""
+    value = canonical_dose_unit(current) if name.endswith('_dose_unit') else str(current or '')
     choices = list(options)
-    if value and value not in choices:
+    # For Doc2Us dosage unit, do not preserve invalid old workbook values such
+    # as application(s), MG, MCG, or G. Force a real live-portal option instead.
+    if name.endswith('_dose_unit') and value not in choices:
+        value = choices[0] if choices else ''
+    elif value and value not in choices:
         choices.insert(0, value)
     rendered = ''.join(
         f'<option value="{escape(opt)}" {"selected" if opt == value else ""}>{escape(opt)}</option>'
