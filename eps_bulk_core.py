@@ -859,7 +859,14 @@ class Doc2UsLiveRunner:
         page.get_by_role('button', name='ADD DRUG').click(force=True, timeout=30000)
         page.wait_for_timeout(700)
         modal = page.locator('ngb-modal-window')
-        self._select_option(page, modal.locator('mat-select').nth(0), _clean(row.get('route')) or 'Oral')
+        route = _clean(row.get('route')) or 'Oral'
+        route_aliases = {
+            'nasal': 'Intranasal',
+            'inhalation': 'Oral Inhalation',
+            'ophthalmic': 'Ocular',
+        }
+        route = route_aliases.get(route.lower(), route)
+        self._select_option(page, modal.locator('mat-select').nth(0), route)
         dose_unit = _clean(row.get('dose_unit')) or 'tab(s)/cap(s)'
         canonical_dose_units = {
             'ml': 'mL',
@@ -884,6 +891,12 @@ class Doc2UsLiveRunner:
         self._select_option(page, modal.locator('mat-select').nth(1), dose_unit)
         self._select_option(page, modal.locator('mat-select').nth(2), _clean(row.get('frequency')) or 'Once daily')
         prescribed_unit = _clean(row.get('prescribed_unit')) or 'tablet(s)'
+        prescribed_unit_aliases = {
+            'ml': 'mL',
+            'ampoule': 'Ampoule(s)',
+            'ampoules': 'Ampoule(s)',
+        }
+        prescribed_unit = prescribed_unit_aliases.get(prescribed_unit.lower(), prescribed_unit)
         if prescribed_unit.lower() in {'tablet', 'tablets', 'tab', 'tabs'}:
             prescribed_unit = 'tablet(s)'
         elif prescribed_unit.lower() in {'capsule', 'capsules', 'cap', 'caps'}:

@@ -1,0 +1,121 @@
+Doc2Us EPS dropdown live portal verification - 2026-06-04
+
+Live portal checked directly using qsbfl1@alpropharmacy.com.
+Path tested: Medication Record > patient 801126135147 > Create New Medication Record > ADD DRUG.
+No final medication/prescription submission was done.
+
+Live Add Drug dropdowns extracted:
+
+1) Route dropdown
+- Oral
+- Topical
+- Oral Inhalation
+- Intranasal
+- Ocular
+- Otic
+- Subcutaneous (e.g. Insulin)
+- Sublingual
+- Buccal
+- Gargle
+- Rectal
+- Vaginal
+- Intramuscular
+- Intravenous
+- Other
+
+2) Dosage Unit dropdown
+- tab(s)/cap(s)
+- mL
+- lozenge(s)
+- sachet(s)
+- drops
+- application
+- patches
+- puff(s)
+- Inhalation(s)
+- spray(s)
+- unit(s)
+- supp.
+- pessaries
+- nebules
+- Ampoule(s)
+
+3) Frequency dropdown
+- Every morning
+- Every morning & afternoon
+- Every morning & night
+- Every night
+- Once daily
+- Twice daily
+- Three times daily
+- Four times daily
+- Five times daily
+- Every hour
+- Every 2 hours
+- Every 4 hours
+- Every 6 hours
+- Every 8 hours
+- Every 12 hours
+- 72 hourly
+- Once a week
+- Once a month
+- Twice a month
+- Twice a week
+- Every other day
+- Every other morning
+- Every other night
+- Five times a week
+- Monday to Friday
+- On Mondays & Fridays
+- On Mondays & Thursdays
+- On Mondays & Wednesdays
+- On Mondays, Wednesdays & Fridays
+- On Tuesdays & Thursdays
+- On Tuesdays, Thursdays & Saturdays
+- On Wednesdays & Fridays
+- On Wednesdays & Saturdays
+- On Saturdays & Sundays
+- Half an hour before dinner
+- Half an hour before lunch
+- Breakfast, lunch & dinner
+- Immediately
+- When necessary
+- Other
+
+4) Prescribed Unit dropdown
+- tablet(s)
+- capsule(s)
+- supp.
+- mL
+- L
+- g
+- bottle(s)
+- cartridge(s)
+- canister(s)
+- pen(s)
+- unit(s)
+- tube(s)
+- sachet(s)
+- piece(s)
+- vial(s)
+- Ampoule(s)
+
+Automation changes made:
+- Review page Route, Dosage Unit, Frequency, and Prescribed Unit dropdowns now match the live portal lists exactly.
+- Removed old wrong/local options such as application(s), drop(s), ml lowercase, Ophthalmic, Nasal, Inhalation, Once weekly, Before meal, After meal, box(es).
+- Existing old dose-unit values are canonicalized before display/submission:
+  application(s) -> application
+  drop(s) -> drops
+  ml -> mL
+- Strength units MG/MCG are not inserted into Doc2Us Dosage Unit dropdown.
+
+Local verification:
+- Python compile passed.
+- Route options match live portal: True
+- Dosage Unit options match live portal: True
+- Frequency options match live portal: True
+- Prescribed Unit options match live portal: True
+- application(s) is no longer preserved as a custom review option.
+
+Live screenshot evidence:
+/tmp/doc2us_dropdown_live_check/add_drug_modal.png
