@@ -223,24 +223,27 @@ class Doc2UsLiveRunner:
         page.wait_for_url('**/dashboard', timeout=60000)
 
     def _select_option(self, page, select_locator, contains_text: str) -> None:
-        """Select a Material mat-select option with portal-safe synonyms.
+        """Select a Material mat-select option using only live portal labels/safe aliases.
 
-        Doc2Us option labels are inconsistent between builds. Some rows reviewed
-        from Excel carry short units such as `mg`, but the live Add Drug dose
-        unit dropdown may only expose dosage-form units like `tab(s)/cap(s)`.
-        Do not wait forever for a missing `mat-option:has-text("mg")`; expand
-        synonyms, inspect visible options, and fail with evidence if none match.
+        For Doc2Us Add Drug > Dosage Unit, the review dropdown is now restricted
+        to the live portal labels. Strength units such as MG/MCG/G must not be
+        invented here; they belong to medication strength/catalogue matching.
         """
         wanted = _clean(contains_text)
         synonyms = {
-            # Strength units must remain strength units. Do not fall back from
-            # MG to tablet/capsule; that silently changes reviewed pharmacist
-            # input. If the live portal truly lacks MG, fail with visible
-            # option evidence so the correct dropdown/field can be fixed.
-            'mg': ['mg', 'milligram', 'milligram(s)'],
-            'mcg': ['mcg', 'microgram', 'microgram(s)'],
-            'g': ['g', 'gram', 'gram(s)'],
-            'ml': ['ml', 'millilitre', 'milliliter', 'millilitre(s)', 'milliliter(s)'],
+            'ml': ['mL', 'ml'],
+            'drop(s)': ['drops', 'drop(s)'],
+            'drops': ['drops', 'drop(s)'],
+            'puff(s)': ['puff(s)', 'puffs'],
+            'puffs': ['puff(s)', 'puffs'],
+            'inhalation': ['Inhalation(s)', 'inhalation'],
+            'inhalations': ['Inhalation(s)', 'inhalations'],
+            'application(s)': ['application', 'application(s)'],
+            'applications': ['application', 'applications'],
+            'patch': ['patches', 'patch'],
+            'patches': ['patches', 'patch'],
+            'ampoule': ['Ampoule(s)', 'ampoule'],
+            'ampoules': ['Ampoule(s)', 'ampoules'],
             'tablet': ['tab(s)/cap(s)', 'tablet(s)', 'tablet'],
             'tablets': ['tab(s)/cap(s)', 'tablet(s)', 'tablet'],
             'tab': ['tab(s)/cap(s)', 'tablet(s)', 'tablet'],
