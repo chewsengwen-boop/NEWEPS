@@ -1,0 +1,36 @@
+NEWEPS EPS live test report - 2026-06-04
+
+Login tested:
+- Email: qsbfl1@alpropharmacy.com
+- Result: PASSED, landed on https://eps.doc2us.com/dashboard
+
+Patch verification:
+1) 801126135147 / LEE FOOK KING
+- Before patched retry: Medication Record search could not find patient.
+- Found bug during live test: acknowledgement checkbox was being toggled back off by automation clicking the text "I acknowledge" after checking the box.
+- Patch added: select termOne checkbox and do not click acknowledgement text after it is selected.
+- Live retest result: PASSED.
+- Registration opened patient medication page:
+  https://eps.doc2us.com/medication-record/patient-profile/8071486/new-medication
+- Post-registration Medication Record search result:
+  Search key 801126135147 shows LEE FOOK KING / IC 801126135147 / phone 60178079147 / Female / Total Medication Record 0.
+- Additional dry-run fill test with final_submit=False: PASSED.
+  It reached Screening Questionnaire for BENCOVEE without final prescription submission.
+- Screenshot evidence:
+  /tmp/neweps_live_verify_801_v3/post_register.png
+  /tmp/neweps_live_verify_801_v3/after_search.png
+  /tmp/neweps_live_verify_801_fill/801_fill_final_false.png
+
+2) 861226526019 / ANDREW NGO CHEK SOONG / MG issue
+- Patient search: PASSED. Existing patient found, before_count=5.
+- Live dropdown test with dose_unit='MG': portal REJECTED MG because Doc2Us Dosage Unit dropdown does not contain MG.
+- Visible live Doc2Us dosage-unit options were:
+  tab(s)/cap(s), mL, lozenge(s), sachet(s), drops, application, patches, puff(s), Inhalation(s), spray(s), unit(s), supp., pessaries, nebules, Ampoule(s)
+- Patch behavior is correct/safe: the automation no longer silently converts MG to tab(s)/cap(s). It now stops with a clear error if MG is requested, because MG is not a selectable live portal dosage unit.
+- Screenshot evidence:
+  /tmp/neweps_live_verify_861_mg/861_mg_error.png
+
+Important conclusion:
+- 801126135147 registration/search problem is fixed and live verified.
+- 861226526019 cannot be submitted with Dosage Unit = MG because the live Doc2Us portal does not offer MG in that dropdown. The correct package should stop and tell the pharmacist to choose one of the live portal options, instead of silently entering tab(s)/cap(s).
+- No final prescription request was submitted in these tests; final_submit=False was used for data-entry verification where appropriate.

@@ -376,9 +376,9 @@ class Doc2UsLiveRunner:
             except Exception:
                 return ''
 
-    def _goto_patient_search(self, page, ic: str) -> None:
+    def _goto_patient_search(self, page, search_key: str) -> None:
         """Open patient search; Doc2Us often keeps network requests open, so do not rely only on networkidle."""
-        url = f'https://eps.doc2us.com/medication-record;searchKey={ic}'
+        url = f'https://eps.doc2us.com/medication-record;searchKey={search_key}'
         try:
             page.goto(url, wait_until='domcontentloaded', timeout=60000)
         except Exception:
@@ -390,17 +390,69 @@ class Doc2UsLiveRunner:
         page.wait_for_selector('body', state='attached', timeout=30000)
         page.wait_for_timeout(1500)
 
-    def _patient_record_count(self, page, ic: str) -> int | None:
+    def _patient_search_keys(self, row_or_ic) -> list[str]:
+        """Return safe alternate keys for Medication Record search.
+
+        Doc2Us sometimes accepts the patient through registration but still does
+        not return the row when searching by NRIC immediately. For 801126135147
+        the page kept showing No Patient Found by IC after submit, so verify with
+        IC, mobile, then exact patient name before deciding it is truly not
+        visible to this pharmacy account.
+        """
+        if hasattr(row_or_ic, 'get'):
+            raw_keys = [
+                _clean(row_or_ic.get('patient_ic')),
+                _clean(row_or_ic.get('mobile')),
+                _clean(row_or_ic.get('patient_name')),
+            ]
+        else:
+            raw_keys = [_clean(row_or_ic)]
+        keys: list[str] = []
+        for key in raw_keys:
+            key = re.sub(r'\s+', ' ', key).strip()
+            if key and key not in keys:
+                keys.append(key)
+        return keys
+
+    def _patient_result_visible_for_row(self, page, row_or_ic) -> bool:
+        ic = _clean(row_or_ic.get('patient_ic')) if hasattr(row_or_ic, 'get') else _clean(row_or_ic)
+        name = _clean(row_or_ic.get('patient_name')).upper() if hasattr(row_or_ic, 'get') else ''
+        mobile = re.sub(r'\D+', '', _clean(row_or_ic.get('mobile'))) if hasattr(row_or_ic, 'get') else ''
+        text = self._body_text_safe(page, timeout=10000)
+        upper = text.upper()
+        digits = re.sub(r'\D+', '', text)
+        if ic and ic in text:
+            return True
+        if name and name in upper:
+            return True
+        if mobile and mobile in digits:
+            return True
+        return bool(page.get_by_role('button', name='Medication Record').count())
+
+    def _open_patient_search_result(self, page, row_or_ic) -> bool:
+        for key in self._patient_search_keys(row_or_ic):
+            self._goto_patient_search(page, key)
+            if self._patient_result_visible_for_row(page, row_or_ic):
+                if page.get_by_role('button', name='Medication Record').count():
+                    page.get_by_role('button', name='Medication Record').first.click(force=True)
+                    page.wait_for_timeout(1000)
+                    return True
+        return False
+
+    def _patient_record_count(self, page, row_or_ic) -> int | None:
         """Return Total Medication Record from the patient search page, if visible."""
-        self._goto_patient_search(page, ic)
-        text = self._body_text_safe(page, timeout=20000)
-        pattern = re.compile(rf'{re.escape(ic)}\s+\S+\s+(?:Male|Female|Other)\s+(\d+)\b', re.IGNORECASE)
-        match = pattern.search(text)
-        if match:
-            return int(match.group(1))
-        fallback = re.search(r'Total Medication Record\s+.*?\b(?:Male|Female|Other)\s+(\d+)\b', text, re.IGNORECASE | re.DOTALL)
-        if fallback:
-            return int(fallback.group(1))
+        for key in self._patient_search_keys(row_or_ic):
+            self._goto_patient_search(page, key)
+            text = self._body_text_safe(page, timeout=20000)
+            if not self._patient_result_visible_for_row(page, row_or_ic):
+                continue
+            pattern = re.compile(r'Total Medication Record\s+.*?\b(?:Male|Female|Other)\s+(\d+)\b', re.IGNORECASE | re.DOTALL)
+            match = pattern.search(text)
+            if match:
+                return int(match.group(1))
+            rows = re.findall(r'\b(?:Male|Female|Other)\s+(\d+)\b', text, re.IGNORECASE)
+            if rows:
+                return int(rows[-1])
         return None
 
     def _submit_one(self, page, row: pd.Series, pos: int) -> dict[str, Any]:
@@ -410,32 +462,32 @@ class Doc2UsLiveRunner:
         if not ic or not medication:
             raise ValueError('Missing patient IC or medication name')
 
-        before_count = self._patient_record_count(page, ic)
+        before_count = self._patient_record_count(page, row)
         registered_patient = False
         # Open existing patient if search result is shown; otherwise register the patient in EPS, then reopen the Medication Record.
-        if page.get_by_role('button', name='Medication Record').count():
-            page.get_by_role('button', name='Medication Record').first.click(force=True)
+        if self._open_patient_search_result(page, row):
+            pass
         else:
             self._register_patient_if_missing(page, row)
             registered_patient = True
-            before_count = self._patient_record_count(page, ic)
+            before_count = self._patient_record_count(page, row)
             # Newly registered patients can take a few seconds to appear in the
-            # medication-record list. Re-search before deciding that registration
-            # failed; do not claim registration completed when the portal still
-            # shows No Patient Found.
+            # medication-record list. Re-search with IC, phone, and exact name
+            # before deciding that registration failed; do not claim registration
+            # completed when the portal still shows No Patient Found.
             opened_after_register = False
-            for attempt in range(5):
-                if page.get_by_role('button', name='Medication Record').count():
-                    page.get_by_role('button', name='Medication Record').first.click(force=True)
+            for attempt in range(8):
+                if self._open_patient_search_result(page, row):
                     opened_after_register = True
                     break
-                page.wait_for_timeout(2500)
-                self._goto_patient_search(page, ic)
+                page.wait_for_timeout(3000)
             if not opened_after_register:
                 body = self._body_text_safe(page, timeout=5000)
+                tried = ', '.join(self._patient_search_keys(row))
                 raise RuntimeError(
                     f'Patient registration was submitted but the live Medication Record search still cannot find IC {ic}. '
-                    f'This row is REGISTERED_UNVERIFIED; do not create medication record until portal search shows the patient. Page: {body[:800]}'
+                    f'Tried search keys: {tried}. This row is REGISTERED_UNVERIFIED; do not create medication record until portal search shows the patient. '
+                    f'If Doc2Us says the NRIC already exists elsewhere, this is a Doc2Us account-link/visibility issue for {self.login_email}, not an automation data-entry issue. Page: {body[:800]}'
                 )
         page.wait_for_timeout(1000)
         page.get_by_text('Create New Medication Record', exact=False).click(force=True, timeout=30000)
@@ -456,7 +508,7 @@ class Doc2UsLiveRunner:
         verification_screenshot = ''
         status = 'SUBMITTED_UNVERIFIED' if self.final_submit else 'FILLED_NOT_SUBMITTED'
         if self.final_submit:
-            after_count = self._patient_record_count(page, ic)
+            after_count = self._patient_record_count(page, row)
             verification_screenshot = str(self.screenshot_dir / f'row_{pos+1}_verified_count.png')
             page.screenshot(path=verification_screenshot, full_page=True)
             if before_count is not None and after_count is not None and after_count >= before_count + 1:
@@ -656,8 +708,10 @@ class Doc2UsLiveRunner:
                             box.check(force=True, timeout=1000)
                         except Exception:
                             box.evaluate("""el => {
+                                // Do not dispatch a click here: the hidden Doc2Us checkbox can
+                                // toggle back to false when clicked programmatically. Set checked
+                                // and notify Angular with input/change only.
                                 el.checked = true;
-                                el.dispatchEvent(new MouseEvent('click', {bubbles: true}));
                                 el.dispatchEvent(new Event('input', {bubbles: true}));
                                 el.dispatchEvent(new Event('change', {bubbles: true}));
                             }""")
@@ -669,8 +723,8 @@ class Doc2UsLiveRunner:
             page.evaluate("""() => {
                 for (const el of document.querySelectorAll('input[formcontrolname="termOne"], input[type="checkbox"]')) {
                     if (!el.checked) {
+                        // Do not fire a click event here; it can toggle the hidden checkbox off again.
                         el.checked = true;
-                        el.dispatchEvent(new MouseEvent('click', {bubbles: true}));
                         el.dispatchEvent(new Event('input', {bubbles: true}));
                         el.dispatchEvent(new Event('change', {bubbles: true}));
                     }
@@ -678,8 +732,9 @@ class Doc2UsLiveRunner:
             }""")
         except Exception:
             pass
-        for text in ['Acknowledge', 'I acknowledge', 'Agree', 'I agree']:
-            self._click_text_if_visible(page, text, timeout=1000)
+        # Do not click the acknowledgement text after checking the box: on the
+        # live Doc2Us form, clicking "I acknowledge" toggles termOne back off.
+        # The checkbox has already been selected above.
         submitted = False
         for text in ['Submit', 'REGISTER', 'Register', 'SAVE', 'Save', 'SUBMIT', 'CREATE', 'Create']:
             if self._click_button_text(page, text, timeout=4000) or self._click_text_if_visible(page, text, timeout=1000):
