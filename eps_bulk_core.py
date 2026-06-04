@@ -233,7 +233,11 @@ class Doc2UsLiveRunner:
         """
         wanted = _clean(contains_text)
         synonyms = {
-            'mg': ['mg', 'milligram', 'milligram(s)', 'tab(s)/cap(s)', 'tablet(s)', 'capsule(s)'],
+            # Strength units must remain strength units. Do not fall back from
+            # MG to tablet/capsule; that silently changes reviewed pharmacist
+            # input. If the live portal truly lacks MG, fail with visible
+            # option evidence so the correct dropdown/field can be fixed.
+            'mg': ['mg', 'milligram', 'milligram(s)'],
             'mcg': ['mcg', 'microgram', 'microgram(s)'],
             'g': ['g', 'gram', 'gram(s)'],
             'ml': ['ml', 'millilitre', 'milliliter', 'millilitre(s)', 'milliliter(s)'],
@@ -676,18 +680,37 @@ class Doc2UsLiveRunner:
             pass
         for text in ['Acknowledge', 'I acknowledge', 'Agree', 'I agree']:
             self._click_text_if_visible(page, text, timeout=1000)
+        submitted = False
         for text in ['Submit', 'REGISTER', 'Register', 'SAVE', 'Save', 'SUBMIT', 'CREATE', 'Create']:
             if self._click_button_text(page, text, timeout=4000) or self._click_text_if_visible(page, text, timeout=1000):
                 page.wait_for_timeout(3500)
+                submitted = True
                 break
-        else:
+        if not submitted:
             body = self._body_text_safe(page, timeout=5000)
+            if 'recaptcha' in body.lower() or page.locator('iframe[src*="recaptcha"], .g-recaptcha').count():
+                raise RuntimeError(
+                    f'Registration form for IC {ic} is filled but Doc2Us requires manual reCAPTCHA/declaration before submit. '
+                    'Open the headed browser, complete CAPTCHA, then continue; automation must not bypass CAPTCHA.'
+                )
             raise RuntimeError('Patient registration form filled, but no Register/Save/Submit button was found. Page: ' + body[:800])
         # Accept confirmation dialog if the portal shows one.
         popup = page.locator('ngb-modal-window').last
         if popup.count() and popup.get_by_role('button', name='OK').count():
             popup.get_by_role('button', name='OK').click(force=True)
             page.wait_for_timeout(1000)
+        post_body = self._body_text_safe(page, timeout=5000)
+        post_lower = post_body.lower()
+        if 'nric already exists' in post_lower or 'ic already exists' in post_lower:
+            raise RuntimeError(
+                f'Doc2Us says NRIC/IC {ic} already exists, but Medication Record search cannot find it for this staff account. '
+                'This is a portal account visibility conflict; stop and resolve in Doc2Us instead of re-registering.'
+            )
+        if 'recaptcha' in post_lower or 'captcha' in post_lower:
+            raise RuntimeError(
+                f'Registration for IC {ic} did not complete because Doc2Us requires reCAPTCHA/manual verification. '
+                'Automation filled the form but cannot bypass CAPTCHA.'
+            )
 
     def _registration_form_visible(self, page) -> bool:
         try:
@@ -780,14 +803,10 @@ class Doc2UsLiveRunner:
         modal = page.locator('ngb-modal-window')
         self._select_option(page, modal.locator('mat-select').nth(0), _clean(row.get('route')) or 'Oral')
         dose_unit = _clean(row.get('dose_unit')) or 'tab(s)/cap(s)'
-        medication_identity = ' '.join([_clean(row.get('item_name')), _clean(row.get('active_ingredients'))]).lower()
-        # For oral tablet/capsule products (e.g. CELECOXIB 200MG 10S), the
-        # Doc2Us dose unit is the dosage form, not the strength unit. Rows can
-        # arrive from review as `mg`; convert before opening the dropdown so the
-        # live portal is not asked to choose a non-existent `mg` option.
+        # Preserve reviewed strength units such as MG. Only normalize obvious
+        # tablet/capsule wording. Never convert MG to tab(s)/cap(s), because
+        # Johnny expects the EPS portal data to match the reviewed input.
         if dose_unit.lower() in {'tablet', 'tablets', 'tab', 'tabs', 'capsule', 'capsules', 'cap', 'caps'}:
-            dose_unit = 'tab(s)/cap(s)'
-        elif dose_unit.lower() in {'mg', 'mcg', 'g'} and any(tok in medication_identity for tok in ['tablet', 'tab ', ' cap', 'capsule', ' 10s', ' 20s', ' 30s', ' 60s']):
             dose_unit = 'tab(s)/cap(s)'
         self._select_option(page, modal.locator('mat-select').nth(1), dose_unit)
         self._select_option(page, modal.locator('mat-select').nth(2), _clean(row.get('frequency')) or 'Once daily')
